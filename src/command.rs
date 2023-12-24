@@ -16,8 +16,5 @@ pub(crate) enum Command {
 #[derive(Debug, Copy, Clone)]
 pub enum PollParams {
     NoParams,
-    WaitForField {
-        presc: u8,
-        timer: u8,
-    }
+    WaitForField { presc: u8, timer: u8 },
 }

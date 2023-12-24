@@ -9,17 +9,18 @@ mod control;
 mod error;
 mod protocol;
 
-pub use crate::error::St25r95Error;
-pub use crate::callbacks::Callbacks;
-pub use crate::protocol::*;
-pub use crate::command::{PollParams};
-pub use crate::control::PollFlags;
+use {
+    crate::{command::Command, control::Control, error::St25r95Error::SpiError},
+    core::{fmt::Debug, str::from_utf8},
+};
 
-use crate::command::{Command};
-use crate::control::{Control};
-use crate::error::St25r95Error::SpiError;
-use core::fmt::Debug;
-use core::str::from_utf8;
+pub use crate::{
+    callbacks::Callbacks,
+    command::PollParams,
+    control::PollFlags,
+    error::St25r95Error,
+    protocol::*,
+};
 
 pub struct St25r95<'a, E: Debug, C: Callbacks<Error = E>> {
     cb: C,
@@ -149,9 +150,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         self.send_control(Control::Read)?;
 
         let response_header_buf = &mut self.buf[..2];
-        self.cb
-            .read(response_header_buf)
-            .map_err(|e| SpiError(e))?;
+        self.cb.read(response_header_buf).map_err(|e| SpiError(e))?;
 
         let mut response = ReadResponse::new(response_header_buf[0], response_header_buf[1]);
 
@@ -180,7 +179,8 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
     pub fn select_protocol(&mut self, selection: ProtocolSelection) -> Result<(), St25r95Error<E>> {
         let mut data = [0u8; 9];
         data[0] = selection.protocol as u8;
-        data[1..1 + selection.param_len].copy_from_slice(&selection.parameters[..selection.param_len]);
+        data[1..1 + selection.param_len]
+            .copy_from_slice(&selection.parameters[..selection.param_len]);
 
         self.send_command(Command::ProtocolSelect, &data[..1 + selection.param_len])?;
 
@@ -213,8 +213,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
     pub fn poll_field(&mut self, poll_params: PollParams) -> Result<bool, St25r95Error<E>> {
         match poll_params {
             PollParams::NoParams => self.send_command(Command::PollField, &[])?,
-            PollParams::WaitForField { presc, timer } =>
-                self.send_command(Command::PollField, &[0x01, presc, timer])?,
+            PollParams::WaitForField { presc, timer } => {
+                self.send_command(Command::PollField, &[0x01, presc, timer])?
+            }
         }
 
         self.poll(None, PollFlags::CAN_READ)?;
@@ -274,7 +275,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         let response = self.read(true)?;
         match response.code {
             0x55 => Ok(false),
-            0x85 => Ok(true),  // Listening was cancelled
+            0x85 => Ok(true), // Listening was cancelled
             other => Err(St25r95Error::UnknownError(other)),
         }
     }
@@ -311,8 +312,7 @@ impl ReadResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use core::ops::Range;
+    use {super::*, core::ops::Range};
 
     #[test]
     pub fn test_len_decode() {
