@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2023 Foundation Devices, Inc. <hello@foundationdevices.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "st25r95"
+version = "0.1.0"
+edition = "2021"
+description = "Driver for ST25R95 integrated transceiver for contactless applications (NFC)"
+
+[dependencies]
+bitflags = { version = "2.4.1" }
