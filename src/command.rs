@@ -8,7 +8,7 @@ pub(crate) enum Command {
     PollField = 0x03,
     SendRecv = 0x04,
     Listen = 0x05,
-    Send = 0x06,
+    // Send = 0x06,
     WrReg = 0x09,
     Echo = 0x55,
 }
