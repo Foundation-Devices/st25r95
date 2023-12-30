@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod analog;
 mod callbacks;
 mod command;
 mod control;
@@ -15,6 +16,7 @@ use {
 };
 
 pub use crate::{
+    analog::*,
     callbacks::Callbacks,
     command::PollParams,
     control::PollFlags,
@@ -241,6 +243,18 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
     pub fn write_reg(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
         self.send_command(Command::WrReg, data)?;
+        let response = self.read(false)?;
+        match response.code {
+            0x00 => Ok(()),
+            other => Err(St25r95Error::UnknownError(other)),
+        }
+    }
+
+    pub fn set_analog_param(&mut self, analog_param: AnalogParam) -> Result<(), St25r95Error<E>> {
+        let mut data = [0u8; 5];
+        let len = analog_param.as_slice(&mut data);
+
+        self.write_reg(&data[..len])?;
         let response = self.read(false)?;
         match response.code {
             0x00 => Ok(()),

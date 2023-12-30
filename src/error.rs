@@ -22,4 +22,7 @@ pub enum St25r95Error<E: Debug> {
     InvalidLength,
     CrcError,
     ReceptionLostWithoutEof,
+    UnsupportedProtocolSelected,
+    UnsupportedAnalogParameterValueForProtocol,
+    NoModulationParameter,
 }
