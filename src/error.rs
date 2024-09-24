@@ -46,6 +46,8 @@ pub enum St25r95Error<E: Debug> {
     // Tag Detector Calibration
     CalibTagDetectionFailed, // Expected Tag Detection failed
     CalibTimeoutFailed,      // Expected Timeout failed
+
+    EchoFailed,
 }
 
 impl<E: Debug> From<u8> for St25r95Error<E> {

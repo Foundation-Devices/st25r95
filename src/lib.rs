@@ -29,6 +29,7 @@ pub struct St25r95<'a, E: Debug, C: Callbacks<Error = E>> {
     buf: &'a mut [u8],
     dac_ref: Option<u8>,
     dac_guard: u8,
+    listen_mode: bool,
 }
 
 const TIMING_T0: u8 = 1;
@@ -42,6 +43,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
             buf,
             dac_ref: None,
             dac_guard: 0x08,
+            listen_mode: false,
         }
     }
 
@@ -141,31 +143,27 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         }
     }
 
-    fn read(&mut self, is_echo: bool) -> Result<ReadResponse, St25r95Error<E>> {
+    fn read(&mut self) -> Result<ReadResponse, St25r95Error<E>> {
         self.irq_pulse();
         self.send_control(Control::Read)?;
 
-        let response_header_buf = &mut self.buf[..2];
-        self.cb.read(response_header_buf).map_err(|e| SpiError(e))?;
+        let mut response_header_buf = [0u8; 2];
+        self.cb
+            .read(response_header_buf.as_mut_slice())
+            .map_err(|e| SpiError(e))?;
 
-        let mut response = ReadResponse::new(response_header_buf[0], response_header_buf[1]);
-
-        // Handle special case for echo command + error (0x85 = listening cancelled)
-        if response.code == 0x55 && is_echo {
-            if response_header_buf[1] == 0x85 {
-                response.code = 0x85;
-            }
-            response.len = 0;
-        }
-
+        let response = ReadResponse::new(&response_header_buf);
         if response.len != 0 {
             if response.len as usize > self.buf.len() {
-                return Err(St25r95Error::InternalBufferOverflow);
+                return Err(St25r95Error::InvalidResponseLength {
+                    expected: self.buf.len() as u16,
+                    actual: response.len,
+                });
             }
 
             self.cb
                 .read(&mut self.buf[..response.len as usize])
-                .expect("spi transfer");
+                .map_err(|e| SpiError(e))?;
         }
         self.cb.release();
 
@@ -180,15 +178,18 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
     pub fn idn(&mut self) -> Result<(&str, u16), St25r95Error<E>> {
         self.send_command(Command::Idn, &[])?;
         self.poll(None, PollFlags::CAN_READ)?;
-        let response = self.read(false)?;
-        if response.len != 0x0F {
-            return Err(St25r95Error::IdentificationError);
+        let response = self.read()?;
+        if response.len != 15 {
+            return Err(St25r95Error::InvalidResponseLength {
+                expected: 15,
+                actual: response.len,
+            });
         }
 
         let resp = &self.buf[..response.len.into()];
 
         let idn_str = from_utf8(&resp[..13]).map_err(|_| St25r95Error::IdentificationError)?;
-        let rom_crc = ((resp[13] as u16) << 8) | resp[14] as u16;
+        let rom_crc = ((resp[13] as u16) << 8) | resp[14] as u16; // TODO: check endianness
         Ok((idn_str, rom_crc))
     }
 
@@ -206,8 +207,15 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
         // TODO? add polling
 
-        let _response = self.read(false)?;
-        Ok(())
+        let response = self.read()?;
+        if response.len != 0 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 0,
+                actual: response.len,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// This command can be used to detect the presence/absence of an HF field by
@@ -226,17 +234,20 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
         self.poll(None, PollFlags::CAN_READ)?;
 
-        let response = self.read(false)?;
-        if response.len == 0 {
-            Ok(false)
-        } else {
-            Ok(self.buf[0] == 1)
+        let response = self.read()?;
+        match response.len {
+            0 => Ok(false),
+            1 => Ok(self.buf[0] & 0x01 == 1),
+            other => Err(St25r95Error::InvalidResponseLength {
+                expected: 1,
+                actual: other,
+            }),
         }
     }
 
     /// Read data from the remote reader through the ST25R95 in Listen mode
     pub fn read_buf(&mut self) -> Result<(u8, &[u8]), St25r95Error<E>> {
-        let response = self.read(false)?;
+        let response = self.read()?;
         Ok((response.code, &self.buf[..response.len as usize]))
     }
 
@@ -248,8 +259,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
         // TODO? add polling
 
-        let (code, buf) = self.read_buf()?;
-        Ok((code, buf))
+        self.read_buf()
     }
 
     /// In card emulation mode, this command waits for a command from an external reader.
@@ -260,8 +270,15 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
         // TODO? add polling
 
-        self.read(false)?;
-        Ok(())
+        let response = self.read()?;
+        if response.len != 0 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 0,
+                actual: response.len,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// This command immediately sends data to the reader using the Load Modulation method
@@ -274,8 +291,15 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
         // TODO? add polling
 
-        self.read(false)?;
-        Ok(())
+        let response = self.read()?;
+        if response.len != 0 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 0,
+                actual: response.len,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn _idle(
@@ -308,7 +332,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
         // TODO? add polling
 
-        let response = self.read(false)?;
+        let response = self.read()?;
         if response.len != 1 {
             Err(St25r95Error::InvalidResponseLength {
                 expected: 1,
@@ -395,33 +419,57 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         self._idle(params, true)
     }
 
-    pub fn write_reg(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
+    fn write_reg(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
         self.send_command(Command::WrReg, data)?;
 
         // TODO? add polling
 
-        let _response = self.read(false)?;
-        Ok(())
+        let response = self.read()?;
+        if response.len != 0 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 0,
+                actual: response.len,
+            })
+        } else {
+            Ok(())
+        }
     }
 
+    /// Set the Analog Register Configuration address index value before reading or
+    /// overwriting the Analog Register Configuration register (ARC_B) value
     pub fn set_analog_param(&mut self, analog_param: AnalogParam) -> Result<(), St25r95Error<E>> {
         let mut data = [0u8; 5];
         let len = analog_param.as_slice(&mut data);
 
-        self.write_reg(&data[..len])?;
-        let _response = self.read(false)?;
-        Ok(())
+        self.write_reg(&data[..len])
     }
 
-    pub fn echo(&mut self) -> Result<bool, St25r95Error<E>> {
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95. The ST25R95 will exit the listen mode upon reception of an echo command.
+    /// This can be used to stop listen mode.
+    pub fn echo(&mut self) -> Result<(), St25r95Error<E>> {
         self.send_command(Command::Echo, &[])?;
 
-        let response = self.read(true)?;
-        match response.code {
-            0x55 => Ok(false),
-            0x85 => Ok(true), // Listening was cancelled
-            other => Err(St25r95Error::UnknownError(other)),
+        self.send_control(Control::Read)?;
+        let response_buf = &mut self.buf[..if self.listen_mode { 3 } else { 1 }];
+        self.cb.read(response_buf).map_err(|e| SpiError(e))?;
+        if self.buf[0] != Command::Echo as u8 {
+            return Err(St25r95Error::EchoFailed);
         }
+        if self.listen_mode {
+            let response = ReadResponse::new(&self.buf[1..3].try_into().unwrap());
+            if response.code != 0x85 {
+                return Err(St25r95Error::EchoFailed);
+            }
+            if response.len != 0 {
+                return Err(St25r95Error::InvalidResponseLength {
+                    expected: 0,
+                    actual: response.len,
+                });
+            }
+            self.listen_mode = false; // Listening mode was cancelled by the application
+        }
+        Ok(())
     }
 }
 
@@ -432,17 +480,17 @@ struct ReadResponse {
 }
 
 impl ReadResponse {
-    pub fn new(code: u8, len: u8) -> Self {
+    pub fn new(header: &[u8; 2]) -> Self {
         // See datasheet section 4.3 (Support of long frames)
-        let has_longer_len = code >> 7 & 1 != 0;
-        let len = if has_longer_len {
-            let extra_bits = (code as u16 >> 5) & 0b11;
-            (extra_bits << 8) | len as u16
-        } else {
-            len as u16
-        };
-
-        Self { code, len }
+        Self {
+            code: header[0],
+            len: header[1] as u16
+                | if header[0] & 0x80 == 0x80 {
+                    (header[0] as u16 & 0b0110_0000) << 3
+                } else {
+                    0
+                },
+        }
     }
 }
 
@@ -463,7 +511,7 @@ mod tests {
 
     fn check_range(code: u8, len_range: Range<u8>, res_range: Range<u16>) {
         for len in len_range {
-            let res = ReadResponse::new(code, len).len;
+            let res = ReadResponse::new(&[code, len]).len;
             assert!(res_range.contains(&res))
         }
     }
