@@ -12,13 +12,13 @@ mod protocol;
 
 use {
     crate::{command::Command, control::Control, error::St25r95Error::SpiError},
+    command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, str::from_utf8},
 };
 
 pub use crate::{
     analog::*,
     callbacks::Callbacks,
-    command::PollParams,
     control::PollFlags,
     error::St25r95Error,
     protocol::*,
@@ -27,6 +27,8 @@ pub use crate::{
 pub struct St25r95<'a, E: Debug, C: Callbacks<Error = E>> {
     cb: C,
     buf: &'a mut [u8],
+    dac_ref: Option<u8>,
+    dac_guard: u8,
 }
 
 const TIMING_T0: u8 = 1;
@@ -35,30 +37,20 @@ const TIMING_T3: u8 = 10;
 
 impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
     pub fn new(cb: C, buf: &'a mut [u8]) -> Self {
-        Self { cb, buf }
+        Self {
+            cb,
+            buf,
+            dac_ref: None,
+            dac_guard: 0x08,
+        }
     }
 
     pub fn init(&mut self) -> Result<(), St25r95Error<E>> {
         self.reset()?;
-        self.verify_idn()?;
-        Ok(())
-    }
-
-    fn verify_idn(&mut self) -> Result<(), St25r95Error<E>> {
-        self.send_command(Command::Idn, &[])?;
-        self.poll(None, PollFlags::CAN_READ)?;
-        let response = self.read(false)?;
-        if response.code != 0x00 {
-            return Err(St25r95Error::IdentificationError);
-        }
-
-        let buf = &self.buf[..response.len.into()];
-
-        let idn_str = from_utf8(&buf[..12]).map_err(|_| St25r95Error::IdentificationError)?;
+        let (idn_str, _) = self.idn()?;
         if !idn_str.starts_with("NFC") {
             return Err(St25r95Error::IdentificationError);
         }
-
         Ok(())
     }
 
@@ -144,6 +136,8 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
                 curr_timeout += 1;
             }
+            // TODO? missing a 1ms delay here to be sure we poll only once every 1ms
+            // self.cb.delay_ms(1);
         }
     }
 
@@ -175,79 +169,239 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         }
         self.cb.release();
 
-        Ok(response)
+        if response.code == 0 || response.code == 0x80 || response.code == 0x90 {
+            Ok(response)
+        } else {
+            Err(response.code.into())
+        }
     }
 
+    /// The IDN command gives brief information about the ST25R95 and its revision.
+    pub fn idn(&mut self) -> Result<(&str, u16), St25r95Error<E>> {
+        self.send_command(Command::Idn, &[])?;
+        self.poll(None, PollFlags::CAN_READ)?;
+        let response = self.read(false)?;
+        if response.len != 0x0F {
+            return Err(St25r95Error::IdentificationError);
+        }
+
+        let resp = &self.buf[..response.len.into()];
+
+        let idn_str = from_utf8(&resp[..13]).map_err(|_| St25r95Error::IdentificationError)?;
+        let rom_crc = ((resp[13] as u16) << 8) | resp[14] as u16;
+        Ok((idn_str, rom_crc))
+    }
+
+    /// This command selects the RF communication protocol and prepares the ST25R95 for
+    /// communication with a reader or contactless tag.
     pub fn select_protocol(&mut self, selection: ProtocolSelection) -> Result<(), St25r95Error<E>> {
         let mut data = [0u8; 9];
         data[0] = selection.protocol as u8;
-        data[1..1 + selection.param_len]
-            .copy_from_slice(&selection.parameters[..selection.param_len]);
+        if selection.param_len > 0 {
+            data[1..1 + selection.param_len]
+                .copy_from_slice(&selection.parameters[..selection.param_len]);
+        }
 
         self.send_command(Command::ProtocolSelect, &data[..1 + selection.param_len])?;
 
-        let response = self.read(false)?;
-        match response.code {
-            0 => Ok(()),
-            0x82 => Err(St25r95Error::InvalidCommandLength),
-            0x83 => Err(St25r95Error::InvalidProtocol),
-            other => Err(St25r95Error::UnknownError(other)),
-        }
+        // TODO? add polling
+
+        let _response = self.read(false)?;
+        Ok(())
     }
 
-    pub fn field_off(&mut self) -> Result<(), St25r95Error<E>> {
-        self.send_command(Command::ProtocolSelect, &[0x00])
-    }
-
-    pub fn card_emulation_listen(&mut self) -> Result<(), St25r95Error<E>> {
-        self.send_command(Command::Listen, &[])?;
-
-        let response = self.read(false)?;
-        match response.code {
-            0x00 => Ok(()),
-            0x82 => Err(St25r95Error::InvalidCommandLength),
-            0x83 => Err(St25r95Error::InvalidProtocol),
-            0x8F => Err(St25r95Error::NoField),
-            other => Err(St25r95Error::UnknownError(other)),
-        }
-    }
-
-    pub fn poll_field(&mut self, poll_params: PollParams) -> Result<bool, St25r95Error<E>> {
-        match poll_params {
-            PollParams::NoParams => self.send_command(Command::PollField, &[])?,
-            PollParams::WaitForField { presc, timer } => {
-                self.send_command(Command::PollField, &[0x01, presc, timer])?
-            }
+    /// This command can be used to detect the presence/absence of an HF field by
+    /// monitoring the field detector (FieldDet) flag. It can be used as well to wait for
+    /// HF field appearance or disappearance until a defined timeout expires. The answer
+    /// to the PollField command is the value of the FieldDet flag.
+    pub fn poll_field(&mut self, wff: Option<WaitForField>) -> Result<bool, St25r95Error<E>> {
+        match wff {
+            None => self.send_command(Command::PollField, &[])?,
+            Some(WaitForField {
+                apparance,
+                presc,
+                timer,
+            }) => self.send_command(Command::PollField, &[apparance as u8, presc, timer])?,
         }
 
         self.poll(None, PollFlags::CAN_READ)?;
 
         let response = self.read(false)?;
-        match response.code {
-            0x00 => {
-                if response.len == 0 {
-                    Ok(false)
-                } else {
-                    Ok(self.buf[0] == 1)
-                }
-            }
-            0x82 => Err(St25r95Error::InvalidCommandLength),
-            other => Err(St25r95Error::UnknownError(other)),
+        if response.len == 0 {
+            Ok(false)
+        } else {
+            Ok(self.buf[0] == 1)
         }
     }
 
+    /// Read data from the remote reader through the ST25R95 in Listen mode
     pub fn read_buf(&mut self) -> Result<(u8, &[u8]), St25r95Error<E>> {
         let response = self.read(false)?;
         Ok((response.code, &self.buf[..response.len as usize]))
     }
 
+    /// This command sends data to a contactless tag and receives its reply.
+    pub fn send_receive(&mut self, data: &[u8]) -> Result<(u8, &[u8]), St25r95Error<E>> {
+        // Before sending this command, the application must select a protocol.
+        // TODO: add a state phantomdata to protect calling without having selected a protocol
+        self.send_command(Command::SendRecv, data)?;
+
+        // TODO? add polling
+
+        let (code, buf) = self.read_buf()?;
+        Ok((code, buf))
+    }
+
+    /// In card emulation mode, this command waits for a command from an external reader.
+    pub fn listen(&mut self) -> Result<(), St25r95Error<E>> {
+        // Before sending this command, the application must select a protocol.
+        // TODO: add a state phantomdata to protect calling without having selected a protocol
+        self.send_command(Command::Listen, &[])?;
+
+        // TODO? add polling
+
+        self.read(false)?;
+        Ok(())
+    }
+
+    /// This command immediately sends data to the reader using the Load Modulation method
+    /// without waiting for a reply.
+    pub fn send(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
+        // Before sending this command, the application must select a protocol.
+        // TODO: add a state phantomdata to protect calling without having selected a
+        // protocol
+        self.send_command(Command::Send, data)?;
+
+        // TODO? add polling
+
+        self.read(false)?;
+        Ok(())
+    }
+
+    fn _idle(
+        &mut self,
+        mut params: IdleParams,
+        check_params: bool,
+    ) -> Result<WakeUpSource, St25r95Error<E>> {
+        if check_params && params.wus.tag_detection {
+            match self.dac_ref {
+                None => return Err(St25r95Error::CalibrationNeeded),
+                Some(dac_ref) => {
+                    params.dac_data.high =
+                        dac_ref
+                            .checked_add(self.dac_guard)
+                            .ok_or(St25r95Error::TagDetector {
+                                dac_ref,
+                                dac_guard: self.dac_guard,
+                            })?;
+                    params.dac_data.low =
+                        dac_ref
+                            .checked_sub(self.dac_guard)
+                            .ok_or(St25r95Error::TagDetector {
+                                dac_ref,
+                                dac_guard: self.dac_guard,
+                            })?;
+                }
+            }
+        }
+        self.send_command(Command::Idle, &params.to_bytes())?;
+
+        // TODO? add polling
+
+        let response = self.read(false)?;
+        if response.len != 1 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 1,
+                actual: response.len,
+            })
+        } else {
+            self.buf[0]
+                .try_into()
+                .map_err(|_| St25r95Error::InvalidWakeUpSource(self.buf[0]))
+        }
+    }
+
+    /// Calibrate the tag detector as wake-up source by an iterrative process.
+    /// Store the DAC Ref value for further dac_data calculation using dac_guard.
+    pub fn calibrate_tag_detector(&mut self) -> Result<(), St25r95Error<E>> {
+        let mut params = IdleParams {
+            wus: WakeUpSource {
+                lfo_freq: LFOFreq::KHz32,
+                ss_low_pulse: false,
+                irq_in_low_pulse: false,
+                field_detection: false,
+                tag_detection: true,
+                timeout: true,
+            },
+            enter_ctrl: CtrlResConf {
+                field_detector_enabled: false,
+                iref_enabled: false,
+                dac_comp_high: true,
+                lfo_enabled: true,
+                hfo_enabled: false,
+                vdda_enabled: false,
+                hibernate_state_enabled: false,
+                sleep_state_enabled: true,
+            },
+            wu_ctrl: CtrlResConf {
+                field_detector_enabled: false,
+                iref_enabled: true,
+                dac_comp_high: true,
+                lfo_enabled: true,
+                hfo_enabled: true,
+                vdda_enabled: true,
+                hibernate_state_enabled: false,
+                sleep_state_enabled: false,
+            },
+            wu_period: 0,
+            dac_data: DacData {
+                low: 0x00,
+                high: 0x00,
+            },
+            max_sleep: 0x01,
+            ..Default::default()
+        };
+        let wus = self._idle(params, false)?;
+        if !wus.tag_detection {
+            return Err(St25r95Error::CalibTagDetectionFailed);
+        }
+        params.dac_data.high = 0xFC; // max value
+        let mut wus = self._idle(params, false)?;
+        if !wus.timeout {
+            return Err(St25r95Error::CalibTimeoutFailed);
+        }
+        for &val in [0x80, 0x40, 0x20, 0x10, 0x08, 0x04].iter() {
+            if wus.timeout {
+                params.dac_data.high -= val;
+            } else if wus.tag_detection {
+                params.dac_data.high += val;
+            }
+            wus = self._idle(params, false)?;
+        }
+        if wus.timeout {
+            params.dac_data.high -= 0x04;
+        }
+        self.dac_ref = Some(params.dac_data.high);
+        Ok(())
+    }
+
+    /// This command switches the ST25R95 into low power consumption mode and defines the
+    /// way to return to Ready state.
+    ///
+    /// Caution:
+    /// In low power consumption mode the device does not support SPI poll mechanism.
+    /// Application has to rely on IRQ_OUT before reading the answer to the Idle command.
+    pub fn idle(&mut self, params: IdleParams) -> Result<WakeUpSource, St25r95Error<E>> {
+        self._idle(params, true)
+    }
+
     pub fn write_reg(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
         self.send_command(Command::WrReg, data)?;
-        let response = self.read(false)?;
-        match response.code {
-            0x00 => Ok(()),
-            other => Err(St25r95Error::UnknownError(other)),
-        }
+
+        // TODO? add polling
+
+        let _response = self.read(false)?;
+        Ok(())
     }
 
     pub fn set_analog_param(&mut self, analog_param: AnalogParam) -> Result<(), St25r95Error<E>> {
@@ -255,32 +409,8 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         let len = analog_param.as_slice(&mut data);
 
         self.write_reg(&data[..len])?;
-        let response = self.read(false)?;
-        match response.code {
-            0x00 => Ok(()),
-            other => Err(St25r95Error::UnknownError(other)),
-        }
-    }
-
-    pub fn send_receive(&mut self, data: &[u8]) -> Result<(u8, &[u8]), St25r95Error<E>> {
-        self.send_command(Command::SendRecv, data)?;
-        let (code, buf) = self.read_buf()?;
-
-        match code {
-            0x86 => Err(St25r95Error::CommunicationError),
-            0x87 => Err(St25r95Error::FrameTimeoutOrNoTag),
-            0x88 => Err(St25r95Error::InvalidSof),
-            0x89 => Err(St25r95Error::RxBufferOverflow),
-            0x8A => Err(St25r95Error::FramingError),
-            0x8B => Err(St25r95Error::EgtTimeout),
-            0x8C => Err(St25r95Error::InvalidLength),
-            0x8D => Err(St25r95Error::CrcError),
-            0x8E => Err(St25r95Error::ReceptionLostWithoutEof),
-
-            0x80 | 0x90 => Ok((code, buf)),
-
-            other => Err(St25r95Error::UnknownError(other)),
-        }
+        let _response = self.read(false)?;
+        Ok(())
     }
 
     pub fn echo(&mut self) -> Result<bool, St25r95Error<E>> {
@@ -292,14 +422,6 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
             0x85 => Ok(true), // Listening was cancelled
             other => Err(St25r95Error::UnknownError(other)),
         }
-    }
-
-    pub fn calibrate(&mut self) -> Result<(), St25r95Error<E>> {
-        todo!()
-    }
-
-    pub fn idle(&mut self) -> Result<(), St25r95Error<E>> {
-        todo!()
     }
 }
 

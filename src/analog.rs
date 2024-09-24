@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use {
-    crate::{Modulation, Protocol, St25r95Error},
+    crate::{iso15693::Modulation, Protocol, St25r95Error},
     core::fmt::Debug,
 };
 
@@ -34,6 +34,7 @@ impl ArcB {
     ) -> Result<(), St25r95Error<E>> {
         // See Table 35
         match protocol {
+            Protocol::FieldOff => Err(St25r95Error::UnsupportedAnalogParameterValueForProtocol), /* TODO ? */
             Protocol::Iso14443A => {
                 if self.modulation_index as u8 != 0x0d {
                     Err(St25r95Error::UnsupportedAnalogParameterValueForProtocol)
