@@ -1,0 +1,5 @@
+[toolchain]
+channel = "nightly-2024-06-08"
+components = ["rustfmt", "clippy", "rustc"]
+targets = ["armv7a-none-eabi"]
+profile = "minimal"
