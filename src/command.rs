@@ -13,7 +13,7 @@ pub(crate) enum Command {
     RdReg = 0x08,
     WrReg = 0x09,
     // SubFreqRes = 0x0A,
-    // ACFilter = 0x0B,
+    ACFilter = 0x0D,
     Echo = 0x55,
 }
 

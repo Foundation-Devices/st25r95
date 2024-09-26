@@ -88,6 +88,36 @@ impl Builder {
     }
 }
 
+pub type UID = [u8; 4];
+pub type ATQA = u16;
+pub type SAK = u8;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AntiColState {
+    Idle = 0x00,
+    ReadyA = 0x01,
+    Active = 0x04,
+    Halt = 0x80,
+    ReadyAs = 0x81,
+    ActiveAs = 0x84,
+}
+
+impl TryFrom<u8> for AntiColState {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(AntiColState::Idle),
+            0x01 => Ok(AntiColState::ReadyA),
+            0x04 => Ok(AntiColState::Active),
+            0x80 => Ok(AntiColState::Halt),
+            0x81 => Ok(AntiColState::ReadyAs),
+            0x84 => Ok(AntiColState::ActiveAs),
+            _ => Err(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

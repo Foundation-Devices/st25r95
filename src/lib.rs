@@ -16,6 +16,7 @@ use {
     arc_b::ArcB,
     command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, str::from_utf8},
+    iso14443a::{AntiColState, ATQA, SAK, UID},
     iso15693::Modulation,
 };
 
@@ -518,6 +519,91 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         inc_addr: bool,
     ) -> Result<(), St25r95Error<E>> {
         self._write_register(reg, inc_addr, false)
+    }
+
+    /// This command activates the anti-collision filter in Type A card emulation mode.
+    ///
+    /// ## Parameters
+    /// - cascade_level_filter: 1 to 3 UIDs, other number will return
+    ///   InvalidCascadeLevelFilterCount
+    pub fn activate_ac_filter(
+        &mut self,
+        atqa: ATQA,
+        sak: SAK,
+        cascade_level_filter: impl IntoIterator<Item = UID>,
+    ) -> Result<(), St25r95Error<E>> {
+        let mut clf_len = 0;
+        let mut data = [0u8; 15];
+        data[0..2].copy_from_slice(&atqa.to_le_bytes());
+        data[2] = sak;
+        for uid in cascade_level_filter.into_iter() {
+            if clf_len > 3 {
+                return Err(St25r95Error::InvalidCascadeLevelFilterCount(clf_len));
+            }
+            data[3 + clf_len..3 + clf_len + uid.len()].copy_from_slice(uid.as_slice());
+            clf_len += 1;
+        }
+        if clf_len == 0 {
+            return Err(St25r95Error::InvalidCascadeLevelFilterCount(clf_len));
+        }
+        self.send_command(Command::ACFilter, &data[..3 + clf_len])?;
+
+        // TODO? add polling
+
+        let response = self.read()?;
+        if response.len != 0 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 0,
+                actual: response.len,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn _ac_filter_state(&mut self, data: &[u8]) -> Result<AntiColState, St25r95Error<E>> {
+        self.send_command(Command::ACFilter, data)?;
+
+        // TODO? add polling
+
+        let response = self.read()?;
+        if response.len != 1 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 1,
+                actual: response.len,
+            })
+        } else {
+            AntiColState::try_from(self.buf[0])
+                .map_err(|_| St25r95Error::InvalidAntiColState(self.buf[0]))
+        }
+    }
+
+    /// This command de-activates the anti-collision filter in Type A card emulation mode.
+    pub fn deactivate_ac_filter(&mut self) -> Result<AntiColState, St25r95Error<E>> {
+        self._ac_filter_state(&[])
+    }
+
+    /// This command read the Anti-Collision Filter state in Type A card emulation mode.
+    /// Does not de-activate the filter.
+    pub fn anti_collision_state(&mut self) -> Result<AntiColState, St25r95Error<E>> {
+        self._ac_filter_state(&[0x00, 0x00])
+    }
+
+    /// This command sets the Anti-Collision Filter state in Type A card emulation mode.
+    pub fn set_anti_collision_state(&mut self, state: AntiColState) -> Result<(), St25r95Error<E>> {
+        self.send_command(Command::ACFilter, &[state as u8])?;
+
+        // TODO? add polling
+
+        let response = self.read()?;
+        if response.len != 0 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 0,
+                actual: response.len,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// The Echo command verifies the possibility of communication between a Host and the

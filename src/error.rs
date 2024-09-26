@@ -82,6 +82,9 @@ pub enum St25r95Error<E: Debug> {
     CalibTagDetectionFailed, // Expected Tag Detection failed
     CalibTimeoutFailed,      // Expected Timeout failed
 
+    InvalidAntiColState(u8),
+    InvalidCascadeLevelFilterCount(usize),
+
     EchoFailed,
 }
 
