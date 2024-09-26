@@ -3,30 +3,35 @@
 
 #![cfg_attr(not(test), no_std)]
 
-mod analog;
 mod callbacks;
 mod command;
 mod control;
 mod error;
 mod protocol;
+mod register;
 
 use {
     crate::{command::Command, control::Control, error::St25r95Error::SpiError},
+    acc_a::AccA,
+    arc_b::ArcB,
     command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, str::from_utf8},
+    iso15693::Modulation,
 };
 
 pub use crate::{
-    analog::*,
     callbacks::Callbacks,
     control::PollFlags,
     error::St25r95Error,
     protocol::*,
+    register::*,
 };
 
 pub struct St25r95<'a, E: Debug, C: Callbacks<Error = E>> {
     cb: C,
     buf: &'a mut [u8],
+    protocol: Option<Protocol>,
+    modulation: Option<Modulation>,
     dac_ref: Option<u8>,
     dac_guard: u8,
     listen_mode: bool,
@@ -41,6 +46,8 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         Self {
             cb,
             buf,
+            protocol: None,
+            modulation: None,
             dac_ref: None,
             dac_guard: 0x08,
             listen_mode: false,
@@ -214,6 +221,8 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
                 actual: response.len,
             })
         } else {
+            self.protocol = Some(selection.protocol);
+            self.modulation = selection.modulation();
             Ok(())
         }
     }
@@ -253,8 +262,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
     /// This command sends data to a contactless tag and receives its reply.
     pub fn send_receive(&mut self, data: &[u8]) -> Result<(u8, &[u8]), St25r95Error<E>> {
-        // Before sending this command, the application must select a protocol.
-        // TODO: add a state phantomdata to protect calling without having selected a protocol
+        if self.protocol.is_none() {
+            return Err(St25r95Error::ProtocolNotSelected);
+        }
         self.send_command(Command::SendRecv, data)?;
 
         // TODO? add polling
@@ -264,8 +274,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
 
     /// In card emulation mode, this command waits for a command from an external reader.
     pub fn listen(&mut self) -> Result<(), St25r95Error<E>> {
-        // Before sending this command, the application must select a protocol.
-        // TODO: add a state phantomdata to protect calling without having selected a protocol
+        if self.protocol.is_none() {
+            return Err(St25r95Error::ProtocolNotSelected);
+        }
         self.send_command(Command::Listen, &[])?;
 
         // TODO? add polling
@@ -284,9 +295,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
     /// This command immediately sends data to the reader using the Load Modulation method
     /// without waiting for a reply.
     pub fn send(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
-        // Before sending this command, the application must select a protocol.
-        // TODO: add a state phantomdata to protect calling without having selected a
-        // protocol
+        if self.protocol.is_none() {
+            return Err(St25r95Error::ProtocolNotSelected);
+        }
         self.send_command(Command::Send, data)?;
 
         // TODO? add polling
@@ -328,7 +339,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
                 }
             }
         }
-        self.send_command(Command::Idle, &params.to_bytes())?;
+        self.send_command(Command::Idle, &params.data())?;
 
         // TODO? add polling
 
@@ -419,8 +430,25 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         self._idle(params, true)
     }
 
-    fn write_reg(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
-        self.send_command(Command::WrReg, data)?;
+    fn _write_register(
+        &mut self,
+        reg: impl Register,
+        inc_addr: bool,
+        set_index_only: bool,
+    ) -> Result<(), St25r95Error<E>> {
+        if set_index_only {
+            let mut data = [0u8; 3];
+            data[0] = reg.control();
+            data[1] = 0;
+            data[2] = reg.data()[0];
+            self.send_command(Command::WrReg, &data)?;
+        } else {
+            let mut data = [0u8; 4];
+            data[0] = reg.control();
+            data[1] = inc_addr as u8;
+            data[2..].copy_from_slice(&reg.data());
+            self.send_command(Command::WrReg, &data)?;
+        }
 
         // TODO? add polling
 
@@ -435,13 +463,61 @@ impl<'a, E: Debug, C: Callbacks<Error = E>> St25r95<'a, E, C> {
         }
     }
 
-    /// Set the Analog Register Configuration address index value before reading or
-    /// overwriting the Analog Register Configuration register (ARC_B) value
-    pub fn set_analog_param(&mut self, analog_param: AnalogParam) -> Result<(), St25r95Error<E>> {
-        let mut data = [0u8; 5];
-        let len = analog_param.as_slice(&mut data);
+    /// This command is used to read the ACC_A, ARC_B, or Wakeup register.
+    pub fn read_register(&mut self, reg: ReadableRegister) -> Result<u8, St25r95Error<E>> {
+        if self.protocol.is_none() {
+            return Err(St25r95Error::ProtocolNotSelected);
+        }
+        // Set register index first
+        match reg {
+            ReadableRegister::AccA => {
+                self._write_register(AccA::default(self.protocol.unwrap())?, true, true)?
+            }
+            ReadableRegister::ArcB => self._write_register(
+                ArcB::default(self.protocol.unwrap(), &self.modulation)?,
+                true,
+                true,
+            )?,
+            _ => {}
+        }
+        let mut data = [0u8; 3];
+        data[0] = match reg {
+            ReadableRegister::AccA | ReadableRegister::ArcB => 0x69,
+            ReadableRegister::WakeupEvent => 0x62,
+        };
+        data[1] = 0x01;
+        data[2] = 0x00;
+        self.send_command(Command::RdReg, &data)?;
 
-        self.write_reg(&data[..len])
+        // TODO? add polling
+
+        let response = self.read()?;
+        if response.len != 1 {
+            Err(St25r95Error::InvalidResponseLength {
+                expected: 1,
+                actual: response.len,
+            })
+        } else {
+            Ok(self.buf[0])
+        }
+    }
+
+    /// The WriteRegister command is used to:
+    /// • set the Analog Register Configuration register (ArcB) value
+    /// • set the Analog Register Configuration register (AccA) value
+    /// • set the TimerWindow value used to improve ST25R95 demodulation when
+    ///   communicating with ISO/IEC 14443 Type A tags
+    /// • set the AutoDetect Filter used to help synchronization of ST25R95 with FeliCa™
+    ///   tags
+    // • configure the HF2RF bit
+    // Note: When the HF2RF bit is ‘0’, Reader mode is possible (default mode). When set
+    // to ‘1’, VPS_TX power consumption is reduced (Ready mode).
+    pub fn write_register(
+        &mut self,
+        reg: impl Register,
+        inc_addr: bool,
+    ) -> Result<(), St25r95Error<E>> {
+        self._write_register(reg, inc_addr, false)
     }
 
     /// The Echo command verifies the possibility of communication between a Host and the

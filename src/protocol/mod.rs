@@ -43,4 +43,17 @@ impl ProtocolSelection {
             param_len: 0,
         }
     }
+
+    // TODO: find a better way to not have to extract this info
+    pub(crate) fn modulation(&self) -> Option<iso15693::Modulation> {
+        if self.protocol == Protocol::Iso15693 {
+            Some(if self.parameters[0] & 0b0000_0100 == 0 {
+                iso15693::Modulation::Percent100
+            } else {
+                iso15693::Modulation::Percent10
+            })
+        } else {
+            None
+        }
+    }
 }

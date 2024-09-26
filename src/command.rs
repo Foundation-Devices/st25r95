@@ -10,7 +10,7 @@ pub(crate) enum Command {
     Listen = 0x05,
     Send = 0x06,
     Idle = 0x07,
-    // RdReg = 0x08,
+    RdReg = 0x08,
     WrReg = 0x09,
     // SubFreqRes = 0x0A,
     // ACFilter = 0x0B,
@@ -222,7 +222,7 @@ impl Default for IdleParams {
 impl IdleParams {
     // TODO: impl a Builder that check max_sleep range
 
-    pub fn to_bytes(self) -> [u8; 14] {
+    pub(crate) fn data(self) -> [u8; 14] {
         let mut data = [0u8; 14];
         data[0] = self.wus.into();
         let enter_ctrl: u16 = self.enter_ctrl.into();
@@ -357,7 +357,7 @@ mod tests {
                 max_sleep: 0,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x08, 0x04, 0x00, 0x04, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
         // Example of switch from Active to WFE mode (wake-up by low pulse on IRQ_IN pin)
@@ -398,7 +398,7 @@ mod tests {
                 max_sleep: 0,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x08, 0x01, 0x00, 0x38, 0x00, 0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
         // Example of switch from Active to WFE mode (wake-up by low pulse on SPI_SS pin)
@@ -439,7 +439,7 @@ mod tests {
                 max_sleep: 0,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x10, 0x01, 0x00, 0x38, 0x00, 0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
         // Example of wake-up by Timeout (7 seconds)
@@ -478,7 +478,7 @@ mod tests {
                 swing_count: 0,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x01, 0x21, 0x00, 0x38, 0x00, 0x18, 0x00, 0x00, 0x60, 0x60, 0x00, 0x00, 0x00, 0x08]
         );
         // Example of switch from Active to Tag detector mode (wake-up by tag detection or low
@@ -516,7 +516,7 @@ mod tests {
                 },
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x0A, 0x21, 0x00, 0x39, 0x01, 0x18, 0x00, 0x20, 0x60, 0x60, 0x64, 0x74, 0x3F, 0x08] /* Datasheet gives bytes[3] = 0x79 (with bit 6 set) */
         );
         // Example of a basic Idle command used during the Tag detection Calibration process
@@ -557,7 +557,7 @@ mod tests {
                 max_sleep: 0x01,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x03, 0xA1, 0x00, 0xB8, 0x01, 0x18, 0x00, 0x20, 0x60, 0x60, 0x00, 0x74, 0x3F, 0x01] /* Datasheet gives bytes[3] = 0xF8 (with bit 6 set) */
         );
         // RFAL Idle default value
@@ -599,7 +599,7 @@ mod tests {
                 max_sleep: 0x00,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x0A, 0x21, 0x00, 0x38, 0x01, 0x18, 0x00, 0x20, 0x60, 0x60, 0x74, 0x84, 0x3F, 0x00]
         );
         // RFAL Calibrate default value
@@ -642,7 +642,7 @@ mod tests {
                 max_sleep: 0x01,
                 ..Default::default()
             }
-            .to_bytes(),
+            .data(),
             [0x03, 0xA1, 0x00, 0xB8, 0x01, 0x18, 0x00, 0x00, 0x60, 0x60, 0x00, 0x00, 0x3F, 0x01]
         );
     }

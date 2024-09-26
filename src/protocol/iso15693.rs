@@ -2,17 +2,17 @@ use super::{Protocol, ProtocolSelection};
 
 #[derive(Debug, Default)]
 pub enum Speed {
-    Speed52Kbps = 0b01,
+    Kbps52 = 0b01,
     #[default]
-    Speed26KbpsH = 0b00,
-    Speed6KbpsL = 0b10,
+    Kbps26H = 0b00,
+    Kbps6L = 0b10,
 }
 
 #[derive(Debug, Default)]
 pub enum Modulation {
     #[default]
-    Modulation100Percent = 0,
-    Modulation10Percent = 1,
+    Percent100 = 0,
+    Percent10 = 1,
 }
 
 #[derive(Debug, Default)]
@@ -42,7 +42,7 @@ impl Builder {
         let wait_for_sof_bit = self.wait_for_sof as u8;
         param_byte |= wait_for_sof_bit << 3;
 
-        let modulation_bit = matches!(self.modulation, Modulation::Modulation10Percent) as u8;
+        let modulation_bit = matches!(self.modulation, Modulation::Percent10) as u8;
         param_byte |= modulation_bit << 2;
 
         let subcarrier_bit = matches!(self.subcarrier, Subcarrier::Double) as u8;
@@ -115,7 +115,7 @@ mod tests {
         assert_parameters(
             Protocol::Iso15693,
             Builder::default()
-                .modulation(Modulation::Modulation10Percent)
+                .modulation(Modulation::Percent10)
                 .with_crc()
                 .build(),
             &[0x05],
@@ -125,7 +125,7 @@ mod tests {
         assert_parameters(
             Protocol::Iso15693,
             Builder::default()
-                .modulation(Modulation::Modulation10Percent)
+                .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
                 .with_crc()
                 .build(),
@@ -136,7 +136,7 @@ mod tests {
         assert_parameters(
             Protocol::Iso15693,
             Builder::default()
-                .modulation(Modulation::Modulation10Percent)
+                .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
                 .build(),
             &[0x06],
@@ -145,10 +145,7 @@ mod tests {
         // L 100 S + crc
         assert_parameters(
             Protocol::Iso15693,
-            Builder::default()
-                .speed(Speed::Speed6KbpsL)
-                .with_crc()
-                .build(),
+            Builder::default().speed(Speed::Kbps6L).with_crc().build(),
             &[0x21],
         );
 
@@ -156,8 +153,8 @@ mod tests {
         assert_parameters(
             Protocol::Iso15693,
             Builder::default()
-                .speed(Speed::Speed6KbpsL)
-                .modulation(Modulation::Modulation10Percent)
+                .speed(Speed::Kbps6L)
+                .modulation(Modulation::Percent10)
                 .with_crc()
                 .build(),
             &[0x25],
@@ -167,8 +164,8 @@ mod tests {
         assert_parameters(
             Protocol::Iso15693,
             Builder::default()
-                .speed(Speed::Speed6KbpsL)
-                .modulation(Modulation::Modulation10Percent)
+                .speed(Speed::Kbps6L)
+                .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
                 .with_crc()
                 .build(),
@@ -179,8 +176,8 @@ mod tests {
         assert_parameters(
             Protocol::Iso15693,
             Builder::default()
-                .speed(Speed::Speed6KbpsL)
-                .modulation(Modulation::Modulation10Percent)
+                .speed(Speed::Kbps6L)
+                .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
                 .build(),
             &[0x26],

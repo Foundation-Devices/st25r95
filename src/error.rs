@@ -1,7 +1,15 @@
 // SPDX-FileCopyrightText: 2023 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use core::fmt::Debug;
+use {
+    crate::{
+        acc_a::DemodulatorSensitivity,
+        arc_b::ModulationIndex,
+        iso15693::Modulation,
+        Protocol,
+    },
+    core::fmt::Debug,
+};
 
 #[derive(Debug)]
 pub enum St25r95Error<E: Debug> {
@@ -9,6 +17,7 @@ pub enum St25r95Error<E: Debug> {
     PollTimeout,
     IdentificationError,
     InternalBufferOverflow,
+    ProtocolNotSelected,
 
     // Hardware Errors from chip
     EmdSOFerror23, // SOF error in high part (duration 2 to 3 etu) in ISO/IEC 14443B
@@ -35,14 +44,40 @@ pub enum St25r95Error<E: Debug> {
                     * Type A. */
     UnknownError(u8),
 
-    UnsupportedProtocolSelected,
-    UnsupportedAnalogParameterValueForProtocol,
     NoModulationParameter,
-    InvalidU8Parameter { current: u8, max: u8 },
-    InvalidResponseLength { expected: u16, actual: u16 },
+    IncompatibleProtocol {
+        protocol: Protocol,
+    },
+    InvalidModulationIndex {
+        modulation_index: ModulationIndex,
+        protocol: Protocol,
+        modulation: Option<Modulation>,
+    },
+    InvalidDemodulatorSensitivity {
+        demodulator_sensitivity: DemodulatorSensitivity,
+        protocol: Protocol,
+    },
+    InvalidLoadModulationIndex {
+        load_modulation_index: u8,
+        min: u8,
+        max: u8,
+        protocol: Protocol,
+    },
+    InvalidU8Parameter {
+        min: u8,
+        max: u8,
+        actual: u8,
+    },
+    InvalidResponseLength {
+        expected: u16,
+        actual: u16,
+    },
     InvalidWakeUpSource(u8),
     CalibrationNeeded,
-    TagDetector { dac_ref: u8, dac_guard: u8 },
+    TagDetector {
+        dac_ref: u8,
+        dac_guard: u8,
+    },
     // Tag Detector Calibration
     CalibTagDetectionFailed, // Expected Tag Detection failed
     CalibTimeoutFailed,      // Expected Timeout failed
