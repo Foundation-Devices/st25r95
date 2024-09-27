@@ -170,3 +170,42 @@ pub mod reader {
         }
     }
 }
+
+/* ------------------------------ */
+/* example of data from datasheet */
+/* ------------------------------ */
+
+/* Table 16 */
+/* NFC Forum Tag Type 4B */
+
+// >>> [0x05, 0x00, 0x00] REQB
+// <<< [0x50, 0x77, 0xFE, 0x01, 0xB3, 0x00, 0x00,
+//      0x00, 0x00, 0x00, 0x71, 0x71, 0x8E, 0xBA, 0x00] ATQB
+
+/* Table 17 */
+
+// <<< [0x5092036A8D00000000007171, 0x3411, 0x00]
+//      DataFromTag Original(Received)ValueOfCRC ReceptionFlags
+
+pub struct ReceptionFlags {
+    crc_error: bool,
+}
+
+impl TryFrom<u8> for ReceptionFlags {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        let crc_error = value & 0b0000_0010 != 0;
+        if value & 0b1111_1101 == 0 {
+            Ok(ReceptionFlags { crc_error })
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl From<ReceptionFlags> for u8 {
+    fn from(lbf: ReceptionFlags) -> Self {
+        (lbf.crc_error as u8) << 1
+    }
+}

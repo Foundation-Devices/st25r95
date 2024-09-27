@@ -181,3 +181,55 @@ pub mod reader {
         }
     }
 }
+
+/* ------------------------------ */
+/* example of data from datasheet */
+/* ------------------------------ */
+
+/* NFC Forum Tag Type 5 */
+
+/* Table 16 */
+
+// >>> [0x02, 0x20, 0x00] ???
+
+// Inventory command using different protocol configuration:
+// Uplink: 100% ASK, 1/4 coding
+// Downlink: High data rate, Single sub-carrier
+// >>> [0x26, 0x01, 0x00] (Inventory - 1 slot)
+// <<< [0x00, 0x00, 0xCD, 0xE0, 0x40, 0x6C, 0xD6, 0x29, 0x02, 0xE0, 0x0579, 0x00]
+
+// >>> [] only the EOF will be sent. This can be used for an anti-collision procedure.
+
+/* Table 17 */
+
+// This is a response to Read Single Block command
+// <<< [0x0000000000, 0x77CF, 0x00] DataFromTag Original(Received)ValueOfCRC
+// ReceptionFlags
+
+pub struct ReceptionFlags {
+    crc_error: bool,
+    collision_detected: bool,
+}
+
+impl TryFrom<u8> for ReceptionFlags {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        let crc_error = value & 0b0000_0010 != 0;
+        let collision_detected = value & 0b0000_0001 != 0;
+        if value & 0b1111_1100 == 0 {
+            Ok(ReceptionFlags {
+                crc_error,
+                collision_detected,
+            })
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl From<ReceptionFlags> for u8 {
+    fn from(lbf: ReceptionFlags) -> Self {
+        (lbf.crc_error as u8) << 1 | (lbf.collision_detected as u8)
+    }
+}

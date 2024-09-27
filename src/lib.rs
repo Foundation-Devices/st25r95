@@ -17,7 +17,7 @@ use {
     auto_detect_filter::AutoDetectFilter,
     command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
-    iso14443a::{AntiColState, ATQA, SAK, UID},
+    iso14443a::{card_emulation::AntiColState, ATQA, SAK, UID},
     iso15693::reader::Modulation,
     timer_window::TimerWindow,
     wakeup::Wakeup,
