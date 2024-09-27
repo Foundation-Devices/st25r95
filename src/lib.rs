@@ -53,6 +53,19 @@ pub struct Iso14443B;
 #[derive(Debug, Default)]
 pub struct FeliCa;
 
+type ResultSt25r95FieldOff<'a, SPI, D, I, O, R, P> =
+    Result<St25r95<'a, SPI, D, I, O, FieldOff, R, P>, SPI, I, O>;
+type ResultSt25r95ReaderIso15693<'a, SPI, D, I, O> =
+    Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso15693>, SPI, I, O>;
+type ResultSt25r95ReaderIso14443A<'a, SPI, D, I, O> =
+    Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443A>, SPI, I, O>;
+type ResultSt25r95ReaderIso14443B<'a, SPI, D, I, O> =
+    Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443B>, SPI, I, O>;
+type ResultSt25r95ReaderFelica<'a, SPI, D, I, O> =
+    Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, FeliCa>, SPI, I, O>;
+type ResultSt25r95CardEmulationIso14443A<'a, SPI, D, I, O> =
+    Result<St25r95<'a, SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>, SPI, I, O>;
+
 pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
     spi: SPI,
     delay: D,
@@ -113,7 +126,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
 impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
     St25r95<'a, SPI, D, I, O, FieldOn, R, P>
 {
-    pub fn field_off(mut self) -> Result<St25r95<'a, SPI, D, I, O, FieldOff, R, P>, SPI, I, O> {
+    pub fn field_off(mut self) -> ResultSt25r95FieldOff<'a, SPI, D, I, O, R, P> {
         self.select_protocol(Protocol::FieldOff, protocol::FieldOff)?;
         Ok(St25r95 {
             spi: self.spi,
@@ -293,7 +306,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_iso15693(
         mut self,
         params: iso15693::reader::Parameters,
-    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso15693>, SPI, I, O> {
+    ) -> ResultSt25r95ReaderIso15693<'a, SPI, D, I, O> {
         let modulation = params.get_modulation();
         self.select_protocol(Protocol::Iso15693, params)?;
         Ok(St25r95 {
@@ -316,7 +329,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_iso14443a(
         mut self,
         params: iso14443a::reader::Parameters,
-    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443A>, SPI, I, O> {
+    ) -> ResultSt25r95ReaderIso14443A<'a, SPI, D, I, O> {
         self.select_protocol(Protocol::Iso14443A, params)?;
         Ok(St25r95 {
             spi: self.spi,
@@ -338,7 +351,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_iso14443b(
         mut self,
         params: iso14443b::reader::Parameters,
-    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443B>, SPI, I, O> {
+    ) -> ResultSt25r95ReaderIso14443B<'a, SPI, D, I, O> {
         self.select_protocol(Protocol::Iso14443B, params)?;
         Ok(St25r95 {
             spi: self.spi,
@@ -360,7 +373,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_felica(
         mut self,
         params: felica::reader::Parameters,
-    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, FeliCa>, SPI, I, O> {
+    ) -> ResultSt25r95ReaderFelica<'a, SPI, D, I, O> {
         self.select_protocol(Protocol::FeliCa, params)?;
         Ok(St25r95 {
             spi: self.spi,
@@ -382,7 +395,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_ce_iso14443a(
         mut self,
         params: iso14443a::card_emulation::Parameters,
-    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>, SPI, I, O> {
+    ) -> ResultSt25r95CardEmulationIso14443A<'a, SPI, D, I, O> {
         self.select_protocol(Protocol::CardEmulationIso14443A, params)?;
         Ok(St25r95 {
             spi: self.spi,

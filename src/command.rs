@@ -115,7 +115,7 @@ impl TryFrom<u8> for WakeUpSource {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct CtrlResConf {
     pub field_detector_enabled: bool,
-    pub iref_enabled: bool, /* TODO: Must to be set to 1 in WUCtrLl for tag detection
+    pub iref_enabled: bool, /* TODO: Must to be set to 1 in WUCtrl for tag detection
                              * operations, otherwise must be put to 0 */
     pub dac_comp_high: bool,
     pub lfo_enabled: bool, // TODO: Must be set to 1 in WUCtrl
