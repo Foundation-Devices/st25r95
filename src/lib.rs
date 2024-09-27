@@ -18,7 +18,7 @@ use {
     command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     iso14443a::{AntiColState, ATQA, SAK, UID},
-    iso15693::Modulation,
+    iso15693::reader::Modulation,
     timer_window::TimerWindow,
     wakeup::Wakeup,
 };
@@ -282,7 +282,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// communication with contactless ISO/IEC 15693 tag.
     pub fn protocol_select_iso15693(
         mut self,
-        params: iso15693::Parameters,
+        params: iso15693::reader::Parameters,
     ) -> Result<St25r95<'a, E, C, FieldOn, Reader, Iso15693>, St25r95Error<E>> {
         let modulation = params.get_modulation();
         self.select_protocol(Protocol::Iso15693, params)?;
@@ -302,7 +302,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// communication with contactless ISO/IEC 14443-A tag.
     pub fn protocol_select_iso14443a(
         mut self,
-        params: iso14443a::Parameters,
+        params: iso14443a::reader::Parameters,
     ) -> Result<St25r95<'a, E, C, FieldOn, Reader, Iso14443A>, St25r95Error<E>> {
         self.select_protocol(Protocol::Iso14443A, params)?;
         Ok(St25r95 {
@@ -321,7 +321,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// communication with contactless ISO/IEC 14443-B tag.
     pub fn protocol_select_iso14443b(
         mut self,
-        params: iso14443b::Parameters,
+        params: iso14443b::reader::Parameters,
     ) -> Result<St25r95<'a, E, C, FieldOn, Reader, Iso14443B>, St25r95Error<E>> {
         self.select_protocol(Protocol::Iso14443B, params)?;
         Ok(St25r95 {
@@ -340,7 +340,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// communication with contactless FeliCa tag.
     pub fn protocol_select_felica(
         mut self,
-        params: felica::Parameters,
+        params: felica::reader::Parameters,
     ) -> Result<St25r95<'a, E, C, FieldOn, Reader, FeliCa>, St25r95Error<E>> {
         self.select_protocol(Protocol::FeliCa, params)?;
         Ok(St25r95 {
@@ -359,7 +359,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// communication with a reader in Card Emulation with ISO/IEC 14443-A.
     pub fn protocol_select_ce_iso14443a(
         mut self,
-        params: ce_iso14443a::Parameters,
+        params: iso14443a::card_emulation::Parameters,
     ) -> Result<St25r95<'a, E, C, FieldOn, CardEmulation, Iso14443A>, St25r95Error<E>> {
         self.select_protocol(Protocol::CardEmulationIso14443A, params)?;
         Ok(St25r95 {
@@ -848,14 +848,13 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
         }
     }
 
-    /// Read data from the remote reader through the ST25R95 in Listen mode
-    pub fn read_buf(&mut self) -> Result<(u8, &[u8]), St25r95Error<E>> {
+    /// Receive data from the reader through the ST25R95 in Listen mode.
+    pub fn receive(&mut self) -> Result<(u8, &[u8]), St25r95Error<E>> {
         let response = self.read()?;
         Ok((response.code, &self.buf[..response.len as usize]))
     }
 
-    /// This command immediately sends data to the reader using the Load Modulation method
-    /// without waiting for a reply.
+    /// Immediately sends data to the reader using the Load Modulation method.
     pub fn send(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
         self.send_command(Command::Send, data)?;
 

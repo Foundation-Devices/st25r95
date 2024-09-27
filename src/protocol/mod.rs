@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2023 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pub mod ce_iso14443a;
 pub mod felica;
 pub mod iso14443a;
 pub mod iso14443b;
