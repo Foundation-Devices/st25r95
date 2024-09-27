@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use {super::Register, crate::Error, core::fmt::Debug};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
