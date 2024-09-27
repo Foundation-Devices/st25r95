@@ -8,4 +8,6 @@ edition = "2021"
 description = "Driver for ST25R95 integrated transceiver for contactless applications (NFC)"
 
 [dependencies]
-bitflags = { version = "2.4.1" }
+bitflags = { version = "2.6" }
+derive_more = { version = "1.0", features = ["from"], default-features = false }
+embedded-hal = { version = "1.0" }

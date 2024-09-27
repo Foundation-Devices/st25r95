@@ -1,4 +1,4 @@
-use {super::Register, crate::St25r95Error, core::fmt::Debug};
+use {super::Register, crate::Error, core::fmt::Debug};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct LoadModulationIndex(u8);
@@ -73,26 +73,27 @@ impl Register for AccA {
 }
 
 impl AccA {
-    pub(crate) fn from_u8<E: Debug>(data: u8) -> Result<Self, St25r95Error<E>> {
+    pub(crate) fn from_u8<SPI, I, O>(data: u8) -> Result<Self, Error<SPI, I, O>> {
         let load_modulation_index = data & 0xf;
-        let load_modulation_index = load_modulation_index.try_into().map_err(|_| {
-            St25r95Error::InvalidLoadModulationIndex {
-                load_modulation_index,
-                min: 0x1,
-                max: 0xf,
-            }
-        })?;
+        let load_modulation_index =
+            load_modulation_index
+                .try_into()
+                .map_err(|_| Error::InvalidLoadModulationIndex {
+                    load_modulation_index,
+                    min: 0x1,
+                    max: 0xf,
+                })?;
         let demodulator_sensitivity = (data >> 4) & 0b11;
         let demodulator_sensitivity = demodulator_sensitivity
             .try_into()
-            .map_err(|_| St25r95Error::InvalidDemodulatorSensitivity(demodulator_sensitivity))?;
+            .map_err(|_| Error::InvalidDemodulatorSensitivity(demodulator_sensitivity))?;
         let rfu = data >> 6;
         match rfu {
             0 => Ok(Self {
                 load_modulation_index,
                 demodulator_sensitivity,
             }),
-            _ => Err(St25r95Error::InvalidRFU(rfu)),
+            _ => Err(Error::InvalidRFU(rfu)),
         }
     }
 }
@@ -103,36 +104,40 @@ mod tests {
     use super::*;
 
     #[derive(Debug, PartialEq)]
-    struct TestError {}
+    struct SPI;
+    #[derive(Debug, PartialEq)]
+    struct I;
+    #[derive(Debug, PartialEq)]
+    struct O;
 
     #[test]
     pub fn test_acc_a_from_u8() {
         assert_eq!(
-            AccA::from_u8::<TestError>(0x17),
+            AccA::from_u8::<SPI, I, O>(0x17),
             Ok(AccA {
                 load_modulation_index: LoadModulationIndex::default(),
                 demodulator_sensitivity: DemodulatorSensitivity::Percent10
             })
         );
         assert_eq!(
-            AccA::from_u8::<TestError>(0x07),
-            Err(St25r95Error::InvalidDemodulatorSensitivity(0x0))
+            AccA::from_u8::<SPI, I, O>(0x07),
+            Err(Error::InvalidDemodulatorSensitivity(0x0))
         );
         assert_eq!(
-            AccA::from_u8::<TestError>(0x37),
-            Err(St25r95Error::InvalidDemodulatorSensitivity(0x3))
+            AccA::from_u8::<SPI, I, O>(0x37),
+            Err(Error::InvalidDemodulatorSensitivity(0x3))
         );
         assert_eq!(
-            AccA::from_u8::<TestError>(0x20),
-            Err(St25r95Error::InvalidLoadModulationIndex {
+            AccA::from_u8::<SPI, I, O>(0x20),
+            Err(Error::InvalidLoadModulationIndex {
                 load_modulation_index: 0x0,
                 min: 0x1,
                 max: 0xf,
             })
         );
         assert_eq!(
-            AccA::from_u8::<TestError>(0xE7),
-            Err(St25r95Error::InvalidRFU(0x3))
+            AccA::from_u8::<SPI, I, O>(0xE7),
+            Err(Error::InvalidRFU(0x3))
         );
     }
 }

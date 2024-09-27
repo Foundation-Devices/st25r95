@@ -3,7 +3,6 @@
 
 #![cfg_attr(not(test), no_std)]
 
-mod callbacks;
 mod command;
 mod control;
 mod error;
@@ -11,24 +10,25 @@ mod protocol;
 mod register;
 
 use {
-    crate::{command::Command, control::Control, error::St25r95Error::SpiError},
+    crate::{command::Command, control::Control},
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
     arc_b::{ArcB, ModulationIndex, ReceiverGain},
     auto_detect_filter::AutoDetectFilter,
     command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
+    embedded_hal::{
+        delay::DelayNs,
+        digital::{InputPin, OutputPin},
+        spi::SpiDevice,
+    },
     iso14443a::{card_emulation::AntiColState, ATQA, SAK, UID},
     iso15693::reader::Modulation,
     timer_window::TimerWindow,
     wakeup::Wakeup,
 };
-
-pub use crate::{
-    callbacks::Callbacks,
-    control::PollFlags,
-    error::St25r95Error,
-    protocol::*,
-    register::*,
+pub use {
+    crate::{control::PollFlags, protocol::*, register::*},
+    error::{Error, Result},
 };
 
 // Type State Field
@@ -53,8 +53,11 @@ pub struct Iso14443B;
 #[derive(Debug, Default)]
 pub struct FeliCa;
 
-pub struct St25r95<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> {
-    cb: C,
+pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
+    spi: SPI,
+    delay: D,
+    irq_out: Option<I>,
+    irq_in: O,
     buf: &'a mut [u8],
     dac_ref: Option<u8>,
     dac_guard: u8,
@@ -64,16 +67,21 @@ pub struct St25r95<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> {
     protocol: P,
 }
 
-const TIMING_T0: u8 = 1;
-const TIMING_T1: u8 = 1;
-const TIMING_T3: u8 = 10;
-
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, R, P: Default>
-    St25r95<'a, E, C, FieldOff, R, P>
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
+    St25r95<'a, SPI, D, I, O, FieldOff, R, P>
 {
-    pub fn new(cb: C, buf: &'a mut [u8]) -> Self {
-        Self {
-            cb,
+    pub fn new(
+        spi: SPI,
+        delay: D,
+        irq_out: Option<I>,
+        irq_in: O,
+        buf: &'a mut [u8],
+    ) -> Result<Self, SPI, I, O> {
+        let mut st25r95 = Self {
+            spi,
+            delay,
+            irq_out,
+            irq_in,
             buf,
             dac_ref: None,
             dac_guard: 0,
@@ -81,24 +89,37 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, R, P: Default>
             field: PhantomData,
             role: PhantomData,
             protocol: P::default(),
-        }
+        };
+        // Startup sequence §3.2
+        st25r95.irq_in.set_high().map_err(Error::IrqIn)?;
+        st25r95.delay.delay_us(150); // t0 > 100us
+        st25r95.irq_in_pulse_low()?;
+        st25r95.delay.delay_ms(15); // t3 > 10ms
+
+        //TODO: enter Ready State
+        Ok(st25r95)
     }
 
-    pub fn init(&mut self) -> Result<(), St25r95Error<E>> {
+    pub fn init(&mut self) -> Result<(), SPI, I, O> {
         self.reset()?;
         let (idn_str, _) = self.idn()?;
         if !idn_str.starts_with("NFC") {
-            return Err(St25r95Error::IdentificationError);
+            return Err(Error::IdentificationError);
         }
         Ok(())
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, R, P: Default> St25r95<'a, E, C, FieldOn, R, P> {
-    pub fn field_off(mut self) -> Result<St25r95<'a, E, C, FieldOff, R, P>, St25r95Error<E>> {
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
+    St25r95<'a, SPI, D, I, O, FieldOn, R, P>
+{
+    pub fn field_off(mut self) -> Result<St25r95<'a, SPI, D, I, O, FieldOff, R, P>, SPI, I, O> {
         self.select_protocol(Protocol::FieldOff, protocol::FieldOff)?;
         Ok(St25r95 {
-            cb: self.cb,
+            spi: self.spi,
+            delay: self.delay,
+            irq_out: self.irq_out,
+            irq_in: self.irq_in,
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
@@ -110,135 +131,126 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, R, P: Default> St25r95<'a, E,
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F, R, P> {
-    fn irq_pulse(&self) {
-        self.cb.set_irq_in(true);
-        self.cb.delay_ms(TIMING_T0);
-        self.cb.set_irq_in(false);
-        self.cb.delay_ms(TIMING_T1);
-        self.cb.set_irq_in(true);
-        self.cb.delay_ms(TIMING_T3);
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
+    St25r95<'a, SPI, D, I, O, F, R, P>
+{
+    fn irq_in_pulse_low(&mut self) -> Result<(), SPI, I, O> {
+        self.irq_in.set_low().map_err(Error::IrqIn)?;
+        self.delay.delay_us(20); // t1 > 10us
+        self.irq_in.set_high().map_err(Error::IrqIn)
     }
 
-    fn reset(&mut self) -> Result<(), St25r95Error<E>> {
-        self.irq_pulse();
-        self.cb.select();
+    fn reset(&mut self) -> Result<(), SPI, I, O> {
+        // self.irq_in_pulse_low()?;
         self.send_control(Control::Reset)?;
-        self.cb.release();
         Ok(())
     }
 
-    fn send_control(&mut self, control: Control) -> Result<u8, St25r95Error<E>> {
+    fn send_control(&mut self, ctrl: Control) -> Result<u8, SPI, I, O> {
         let mut dummy = [0];
-        self.cb
-            .transfer(&[control as u8], &mut dummy)
-            .map_err(|e| SpiError(e))?;
+        self.spi
+            .transfer(&mut dummy, &[ctrl as u8])
+            .map_err(Error::Spi)?;
         Ok(dummy[0])
     }
 
-    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<(), St25r95Error<E>> {
+    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<(), SPI, I, O> {
         if data.len() >= self.buf.len() {
-            return Err(St25r95Error::InternalBufferOverflow);
+            return Err(Error::InternalBufferOverflow);
         }
 
-        self.irq_pulse();
+        // self.irq_in_pulse_low()?;
 
         // Clear the dummy buffer for the data that'll go over the SPI bus
         let dummy = &mut self.buf[..data.len()];
         dummy.fill(0);
 
-        self.cb.select();
-
         self.send_control(Control::Command)?;
 
         // Send command header
         let header_dummy = &mut self.buf[..2];
-        self.cb
-            .transfer(&[cmd as u8, data.len() as u8], header_dummy)
-            .map_err(|e| SpiError(e))?;
+        self.spi
+            .transfer(header_dummy, &[cmd as u8, data.len() as u8])
+            .map_err(Error::Spi)?;
         header_dummy.fill(0);
 
         // Send command data
         let data_dummy = &mut self.buf[..data.len()];
-        self.cb
-            .transfer(data, data_dummy)
-            .map_err(|e| SpiError(e))?;
-
-        self.cb.release();
-
+        self.spi.transfer(data_dummy, data).map_err(Error::Spi)?;
         Ok(())
     }
 
-    pub fn poll(
+    fn poll(
         &mut self,
         timeout: impl Into<Option<u32>> + Copy,
         flags: PollFlags,
-    ) -> Result<(), St25r95Error<E>> {
+    ) -> Result<(), SPI, I, O> {
         let mut curr_timeout = 0u32;
 
-        self.irq_pulse();
-        self.cb.select();
+        // self.irq_in_pulse_low()?;
 
         loop {
-            let curr_flags = PollFlags::from_bits_truncate(self.send_control(Control::Poll)?);
-            if curr_flags.contains(flags) {
-                self.cb.release();
-                return Ok(());
+            if let Some(irq_out) = &mut self.irq_out {
+                if irq_out.is_low().map_err(Error::IrqOut)? {
+                    return Ok(());
+                }
+            } else {
+                let curr_flags = PollFlags::from_bits_truncate(self.send_control(Control::Poll)?);
+                if curr_flags.contains(flags) {
+                    return Ok(());
+                }
             }
 
             if let Some(timeout) = timeout.into() {
                 if curr_timeout > timeout {
-                    return Err(St25r95Error::PollTimeout);
+                    return Err(Error::PollTimeout);
                 }
 
                 curr_timeout += 1;
             }
-            // TODO? missing a 1ms delay here to be sure we poll only once every 1ms
-            // self.cb.delay_ms(1);
+            self.delay.delay_ms(1);
         }
     }
 
-    fn read(&mut self) -> Result<ReadResponse, St25r95Error<E>> {
-        self.irq_pulse();
+    fn read(&mut self) -> Result<ReadResponse, SPI, I, O> {
+        // self.irq_in_pulse_low()?;
+        self.poll(None, PollFlags::CAN_READ)?;
+
         self.send_control(Control::Read)?;
 
         let mut response_header_buf = [0u8; 2];
-        self.cb
+        self.spi
             .read(response_header_buf.as_mut_slice())
-            .map_err(|e| SpiError(e))?;
+            .map_err(Error::Spi)?;
 
         let response = ReadResponse::new(&response_header_buf);
         if response.len != 0 {
             if response.len as usize > self.buf.len() {
-                return Err(St25r95Error::InvalidResponseLength {
+                return Err(Error::InvalidResponseLength {
                     expected: self.buf.len() as u16,
                     actual: response,
                 });
             }
 
-            self.cb
+            self.spi
                 .read(&mut self.buf[..response.len as usize])
-                .map_err(|e| SpiError(e))?;
+                .map_err(Error::Spi)?;
         }
-        self.cb.release();
 
         if response.code == 0 || response.code == 0x80 || response.code == 0x90 {
             Ok(response)
         } else {
-            Err(response.code.into())
+            Err(Error::Hw(response.code.into()))
         }
     }
 
     /// The IDN command gives brief information about the ST25R95 and its revision.
-    pub fn idn(&mut self) -> Result<(&str, u16), St25r95Error<E>> {
+    pub fn idn(&mut self) -> Result<(&str, u16), SPI, I, O> {
         self.send_command(Command::Idn, &[])?;
-
-        //TODO? use IRQ_OUT# pin
-        self.poll(None, PollFlags::CAN_READ)?;
 
         let response = self.read()?;
         if response.len != 15 {
-            return Err(St25r95Error::InvalidResponseLength {
+            return Err(Error::InvalidResponseLength {
                 expected: 15,
                 actual: response,
             });
@@ -246,7 +258,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
 
         let resp = &self.buf[..response.len.into()];
 
-        let idn_str = from_utf8(&resp[..13]).map_err(|_| St25r95Error::IdentificationError)?;
+        let idn_str = from_utf8(&resp[..13])?;
         let rom_crc = ((resp[13] as u16) << 8) | resp[14] as u16; // TODO: check endianness
         Ok((idn_str, rom_crc))
     }
@@ -255,7 +267,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         &mut self,
         protocol: Protocol,
         params: impl ProtocolParams,
-    ) -> Result<(), St25r95Error<E>> {
+    ) -> Result<(), SPI, I, O> {
         let mut data = [0u8; 9];
         data[0] = protocol as u8;
         let (d, data_len) = params.data();
@@ -265,11 +277,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
 
         self.send_command(Command::ProtocolSelect, &data[..1 + data_len])?;
 
-        // TODO? add polling
-
         let response = self.read()?;
         if response.len != 0 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response,
             })
@@ -283,11 +293,14 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     pub fn protocol_select_iso15693(
         mut self,
         params: iso15693::reader::Parameters,
-    ) -> Result<St25r95<'a, E, C, FieldOn, Reader, Iso15693>, St25r95Error<E>> {
+    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso15693>, SPI, I, O> {
         let modulation = params.get_modulation();
         self.select_protocol(Protocol::Iso15693, params)?;
         Ok(St25r95 {
-            cb: self.cb,
+            spi: self.spi,
+            delay: self.delay,
+            irq_out: self.irq_out,
+            irq_in: self.irq_in,
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
@@ -303,10 +316,13 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     pub fn protocol_select_iso14443a(
         mut self,
         params: iso14443a::reader::Parameters,
-    ) -> Result<St25r95<'a, E, C, FieldOn, Reader, Iso14443A>, St25r95Error<E>> {
+    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443A>, SPI, I, O> {
         self.select_protocol(Protocol::Iso14443A, params)?;
         Ok(St25r95 {
-            cb: self.cb,
+            spi: self.spi,
+            delay: self.delay,
+            irq_out: self.irq_out,
+            irq_in: self.irq_in,
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
@@ -322,10 +338,13 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     pub fn protocol_select_iso14443b(
         mut self,
         params: iso14443b::reader::Parameters,
-    ) -> Result<St25r95<'a, E, C, FieldOn, Reader, Iso14443B>, St25r95Error<E>> {
+    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443B>, SPI, I, O> {
         self.select_protocol(Protocol::Iso14443B, params)?;
         Ok(St25r95 {
-            cb: self.cb,
+            spi: self.spi,
+            delay: self.delay,
+            irq_out: self.irq_out,
+            irq_in: self.irq_in,
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
@@ -341,10 +360,13 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     pub fn protocol_select_felica(
         mut self,
         params: felica::reader::Parameters,
-    ) -> Result<St25r95<'a, E, C, FieldOn, Reader, FeliCa>, St25r95Error<E>> {
+    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, Reader, FeliCa>, SPI, I, O> {
         self.select_protocol(Protocol::FeliCa, params)?;
         Ok(St25r95 {
-            cb: self.cb,
+            spi: self.spi,
+            delay: self.delay,
+            irq_out: self.irq_out,
+            irq_in: self.irq_in,
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
@@ -360,10 +382,13 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     pub fn protocol_select_ce_iso14443a(
         mut self,
         params: iso14443a::card_emulation::Parameters,
-    ) -> Result<St25r95<'a, E, C, FieldOn, CardEmulation, Iso14443A>, St25r95Error<E>> {
+    ) -> Result<St25r95<'a, SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>, SPI, I, O> {
         self.select_protocol(Protocol::CardEmulationIso14443A, params)?;
         Ok(St25r95 {
-            cb: self.cb,
+            spi: self.spi,
+            delay: self.delay,
+            irq_out: self.irq_out,
+            irq_in: self.irq_in,
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
@@ -381,7 +406,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// The result of this command depends on the protocol selected. If a reader mode
     /// protocol is selected, the flag FieldDet is set to ‘1’ because the RF field is
     /// turned ON by the reader.
-    pub fn poll_field(&mut self, wff: Option<WaitForField>) -> Result<bool, St25r95Error<E>> {
+    pub fn poll_field(&mut self, wff: Option<WaitForField>) -> Result<bool, SPI, I, O> {
         match wff {
             None => self.send_command(Command::PollField, &[])?,
             Some(WaitForField {
@@ -391,13 +416,11 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
             }) => self.send_command(Command::PollField, &[apparance as u8, presc, timer])?,
         }
 
-        self.poll(None, PollFlags::CAN_READ)?;
-
         let response = self.read()?;
         match response.len {
             0 => Ok(false),
             1 => Ok(self.buf[0] & 0x01 == 1),
-            _ => Err(St25r95Error::InvalidResponseLength {
+            _ => Err(Error::InvalidResponseLength {
                 expected: 1,
                 actual: response,
             }),
@@ -408,22 +431,22 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         &mut self,
         mut params: IdleParams,
         check_params: bool,
-    ) -> Result<WakeUpSource, St25r95Error<E>> {
+    ) -> Result<WakeUpSource, SPI, I, O> {
         if check_params && params.wus.tag_detection {
             match self.dac_ref {
-                None => return Err(St25r95Error::CalibrationNeeded),
+                None => return Err(Error::CalibrationNeeded),
                 Some(dac_ref) => {
                     params.dac_data.high =
                         dac_ref
                             .checked_add(self.dac_guard)
-                            .ok_or(St25r95Error::TagDetector {
+                            .ok_or(Error::TagDetector {
                                 dac_ref,
                                 dac_guard: self.dac_guard,
                             })?;
                     params.dac_data.low =
                         dac_ref
                             .checked_sub(self.dac_guard)
-                            .ok_or(St25r95Error::TagDetector {
+                            .ok_or(Error::TagDetector {
                                 dac_ref,
                                 dac_guard: self.dac_guard,
                             })?;
@@ -432,18 +455,16 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         }
         self.send_command(Command::Idle, &params.data())?;
 
-        // TODO? add polling
-
         let response = self.read()?;
         if response.len != 1 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 1,
                 actual: response,
             })
         } else {
             self.buf[0]
                 .try_into()
-                .map_err(|_| St25r95Error::InvalidWakeUpSource(self.buf[0]))
+                .map_err(|_| Error::InvalidWakeUpSource(self.buf[0]))
         }
     }
 
@@ -453,7 +474,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     /// Caution:
     /// In low power consumption mode the device does not support SPI poll mechanism.
     /// Application has to rely on IRQ_OUT before reading the answer to the Idle command.
-    pub fn idle(&mut self, params: IdleParams) -> Result<WakeUpSource, St25r95Error<E>> {
+    pub fn idle(&mut self, params: IdleParams) -> Result<WakeUpSource, SPI, I, O> {
         self._idle(params, true)
     }
 
@@ -462,7 +483,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         reg: &impl Register,
         inc_addr: bool,
         value: Option<u8>,
-    ) -> Result<(), St25r95Error<E>> {
+    ) -> Result<(), SPI, I, O> {
         let mut data = [0u8; 4];
         data[0] = reg.write_addr();
         data[1] = inc_addr as u8;
@@ -483,11 +504,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         };
         self.send_command(Command::WrReg, &data[..data_len])?;
 
-        // TODO? add polling
-
         let response = self.read()?;
         if response.len != 0 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response,
             })
@@ -496,7 +515,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         }
     }
 
-    fn read_register(&mut self, reg: &impl Register) -> Result<u8, St25r95Error<E>> {
+    fn read_register(&mut self, reg: &impl Register) -> Result<u8, SPI, I, O> {
         if reg.has_index() {
             // Set register index first
             self._write_register(reg, false, None)?;
@@ -507,11 +526,9 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
         data[2] = 0x00;
         self.send_command(Command::RdReg, &data)?;
 
-        // TODO? add polling
-
         let response = self.read()?;
         if response.len != 1 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 1,
                 actual: response,
             })
@@ -521,34 +538,34 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
     }
 
     /// This command is used to read the Wakeup register.
-    pub fn wakeup_source(&mut self) -> Result<WakeUpSource, St25r95Error<E>> {
+    pub fn wakeup_source(&mut self) -> Result<WakeUpSource, SPI, I, O> {
         let reg = Wakeup;
         let value = self.read_register(&reg)?;
         value
             .try_into()
-            .map_err(|_| St25r95Error::InvalidWakeUpSource(value))
+            .map_err(|_| Error::InvalidWakeUpSource(value))
     }
 
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95. The ST25R95 will exit the listen mode upon reception of an echo command.
     /// This can be used to stop listen mode.
     // TODO Listen Mode is specific to CardEmulation
-    pub fn echo(&mut self) -> Result<(), St25r95Error<E>> {
+    pub fn echo(&mut self) -> Result<(), SPI, I, O> {
         self.send_command(Command::Echo, &[])?;
 
         self.send_control(Control::Read)?;
         let response_buf = &mut self.buf[..if self.listen_mode { 3 } else { 1 }];
-        self.cb.read(response_buf).map_err(|e| SpiError(e))?;
+        self.spi.read(response_buf).map_err(Error::Spi)?;
         if self.buf[0] != Command::Echo as u8 {
-            return Err(St25r95Error::EchoFailed);
+            return Err(Error::EchoFailed);
         }
         if self.listen_mode {
             let response = ReadResponse::new(&self.buf[1..3].try_into().unwrap());
             if response.code != 0x85 {
-                return Err(St25r95Error::EchoFailed);
+                return Err(Error::EchoFailed);
             }
             if response.len != 0 {
-                return Err(St25r95Error::InvalidResponseLength {
+                return Err(Error::InvalidResponseLength {
                     expected: 0,
                     actual: response,
                 });
@@ -568,23 +585,21 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, F, R, P> St25r95<'a, E, C, F,
 // Note: When the HF2RF bit is ‘0’, Reader mode is possible (default mode). When set
 // to ‘1’, VPS_TX power consumption is reduced (Ready mode).
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, P: Default>
-    St25r95<'a, E, C, FieldOn, Reader, P>
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
+    St25r95<'a, SPI, D, I, O, FieldOn, Reader, P>
 {
     /// This command sends data to a contactless tag and receives its reply.
     /// If the tag response was received and decoded correctly, the <Data> field can
     /// contain additional information which is protocol-specific.
-    pub fn send_receive(&mut self, data: &[u8]) -> Result<(u8, &[u8]), St25r95Error<E>> {
+    pub fn send_receive(&mut self, data: &[u8]) -> Result<(u8, &[u8]), SPI, I, O> {
         self.send_command(Command::SendRecv, data)?;
-
-        // TODO? add polling
 
         let response = self.read()?;
         Ok((response.code, &self.buf[..response.len as usize]))
     }
 
     /// Calibrate the tag detector as wake-up source by an iterrative process.
-    pub fn calibrate_tag_detector(&mut self) -> Result<(), St25r95Error<E>> {
+    pub fn calibrate_tag_detector(&mut self) -> Result<(), SPI, I, O> {
         let mut params = IdleParams {
             wus: WakeUpSource {
                 lfo_freq: LFOFreq::KHz32,
@@ -624,12 +639,12 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, P: Default>
         };
         let wus = self._idle(params, false)?;
         if !wus.tag_detection {
-            return Err(St25r95Error::CalibTagDetectionFailed);
+            return Err(Error::CalibTagDetectionFailed);
         }
         params.dac_data.high = 0xFC; // max value
         let mut wus = self._idle(params, false)?;
         if !wus.timeout {
-            return Err(St25r95Error::CalibTimeoutFailed);
+            return Err(Error::CalibTimeoutFailed);
         }
         for &val in [0x80, 0x40, 0x20, 0x10, 0x08, 0x04].iter() {
             if wus.timeout {
@@ -647,21 +662,23 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy, P: Default>
     }
 
     /// This command is used to read the ARC_B register.
-    pub fn read_arc_b(&mut self) -> Result<ArcB, St25r95Error<E>> {
+    pub fn read_arc_b(&mut self) -> Result<ArcB, SPI, I, O> {
         ArcB::from_u8(self.read_register(&ArcB::fake())?)
     }
 
-    pub fn write_arc_b(&mut self, arc_b: ArcB) -> Result<(), St25r95Error<E>> {
+    pub fn write_arc_b(&mut self, arc_b: ArcB) -> Result<(), SPI, I, O> {
         self._write_register(&arc_b, false, Some(arc_b.value()))
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Reader, Iso15693> {
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+    St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso15693>
+{
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
         receiver_gain: ReceiverGain,
-    ) -> Result<ArcB, St25r95Error<E>> {
+    ) -> Result<ArcB, SPI, I, O> {
         // See Table 35
         if match self.protocol.0 {
             Modulation::Percent10 => [
@@ -677,7 +694,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
                 receiver_gain,
             })
         } else {
-            Err(St25r95Error::InvalidModulationIndex(modulation_index as u8))
+            Err(Error::InvalidModulationIndex(modulation_index as u8))
         }
     }
 
@@ -694,12 +711,14 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Reader, Iso14443A> {
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+    St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443A>
+{
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
         receiver_gain: ReceiverGain,
-    ) -> Result<ArcB, St25r95Error<E>> {
+    ) -> Result<ArcB, SPI, I, O> {
         // See Table 35
         if [ModulationIndex::Percent95].contains(&modulation_index) {
             Ok(ArcB {
@@ -707,7 +726,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
                 receiver_gain,
             })
         } else {
-            Err(St25r95Error::InvalidModulationIndex(modulation_index as u8))
+            Err(Error::InvalidModulationIndex(modulation_index as u8))
         }
     }
 
@@ -717,11 +736,11 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
             .unwrap()
     }
 
-    pub fn new_timer_window(&self, timer_w: u8) -> Result<TimerWindow, St25r95Error<E>> {
+    pub fn new_timer_window(&self, timer_w: u8) -> Result<TimerWindow, SPI, I, O> {
         if (0x50..=0x60).contains(&timer_w) {
             Ok(TimerWindow(timer_w))
         } else {
-            Err(St25r95Error::InvalidU8Parameter {
+            Err(Error::InvalidU8Parameter {
                 min: 0x50,
                 max: 0x60,
                 actual: timer_w,
@@ -744,17 +763,19 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
     /// by fine-tuning the Timer Window value.
     /// The default values of these parameters are set by the ProtocolSelect command, but
     /// they can be overwritten using this function.
-    pub fn write_timer_windows(&mut self, timer_w: TimerWindow) -> Result<(), St25r95Error<E>> {
+    pub fn write_timer_windows(&mut self, timer_w: TimerWindow) -> Result<(), SPI, I, O> {
         self._write_register(&timer_w, false, Some(timer_w.value()))
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Reader, Iso14443B> {
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+    St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443B>
+{
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
         receiver_gain: ReceiverGain,
-    ) -> Result<ArcB, St25r95Error<E>> {
+    ) -> Result<ArcB, SPI, I, O> {
         // See Table 35
         if [
             ModulationIndex::Percent10,
@@ -769,7 +790,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
                 receiver_gain,
             })
         } else {
-            Err(St25r95Error::InvalidModulationIndex(modulation_index as u8))
+            Err(Error::InvalidModulationIndex(modulation_index as u8))
         }
     }
 
@@ -780,12 +801,14 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Reader, FeliCa> {
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+    St25r95<'a, SPI, D, I, O, FieldOn, Reader, FeliCa>
+{
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
         receiver_gain: ReceiverGain,
-    ) -> Result<ArcB, St25r95Error<E>> {
+    ) -> Result<ArcB, SPI, I, O> {
         // See Table 35
         if [
             ModulationIndex::Percent10,
@@ -800,7 +823,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
                 receiver_gain,
             })
         } else {
-            Err(St25r95Error::InvalidModulationIndex(modulation_index as u8))
+            Err(Error::InvalidModulationIndex(modulation_index as u8))
         }
     }
 
@@ -814,14 +837,14 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy> St25r95<'a, E, C, FieldOn, Re
     /// to enable an AutoDetect filter to synchronize FeliCa™ tags with the ST25R95.
     /// By default, this filter is disabled after the execution of the ProtocolSelect
     /// command, but it can be enabled using this function.
-    pub fn enable_autodetect_filter(&mut self) -> Result<(), St25r95Error<E>> {
+    pub fn enable_autodetect_filter(&mut self) -> Result<(), SPI, I, O> {
         let reg = AutoDetectFilter;
         self._write_register(&reg, false, Some(reg.value()))
     }
 }
 
-impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
-    St25r95<'a, E, C, FieldOn, CardEmulation, Iso14443A>
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+    St25r95<'a, SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>
 {
     /// In card emulation mode, this function puts the ST25R95 in Listening mode.
     /// The ST25R95 will exit Listening mode as soon it receives the Echo command from the
@@ -831,14 +854,12 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
     /// must be used to exit the Listening mode prior to sending a new command to the
     /// ST25R95.
     //TODO: handle Listen Mode with a new type state pattern
-    pub fn listen(&mut self) -> Result<(), St25r95Error<E>> {
+    pub fn listen(&mut self) -> Result<(), SPI, I, O> {
         self.send_command(Command::Listen, &[])?;
-
-        // TODO? add polling
 
         let response = self.read()?;
         if response.len != 0 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response,
             })
@@ -849,20 +870,18 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
     }
 
     /// Receive data from the reader through the ST25R95 in Listen mode.
-    pub fn receive(&mut self) -> Result<(u8, &[u8]), St25r95Error<E>> {
+    pub fn receive(&mut self) -> Result<(u8, &[u8]), SPI, I, O> {
         let response = self.read()?;
         Ok((response.code, &self.buf[..response.len as usize]))
     }
 
     /// Immediately sends data to the reader using the Load Modulation method.
-    pub fn send(&mut self, data: &[u8]) -> Result<(), St25r95Error<E>> {
+    pub fn send(&mut self, data: &[u8]) -> Result<(), SPI, I, O> {
         self.send_command(Command::Send, data)?;
-
-        // TODO? add polling
 
         let response = self.read()?;
         if response.len != 0 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response,
             })
@@ -875,10 +894,10 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
         &self,
         load_modulation_index: LoadModulationIndex,
         demodulator_sensitivity: DemodulatorSensitivity,
-    ) -> Result<AccA, St25r95Error<E>> {
+    ) -> Result<AccA, SPI, I, O> {
         // See Table 36
         if demodulator_sensitivity != DemodulatorSensitivity::Percent100 {
-            Err(St25r95Error::InvalidDemodulatorSensitivity(
+            Err(Error::InvalidDemodulatorSensitivity(
                 demodulator_sensitivity as u8,
             ))
         } else {
@@ -902,7 +921,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
     }
 
     /// This command is used to read the ACC_A register.
-    pub fn read_acc_a(&mut self) -> Result<AccA, St25r95Error<E>> {
+    pub fn read_acc_a(&mut self) -> Result<AccA, SPI, I, O> {
         AccA::from_u8(self.read_register(&self.default_acc_a())?)
     }
 
@@ -910,7 +929,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
     /// emulation mode can help to improve application behavior.
     /// The default values of these parameters are set by the ProtocolSelect command, but
     /// they can be overwritten using this function.
-    pub fn write_acc_a(&mut self, acc_a: AccA) -> Result<(), St25r95Error<E>> {
+    pub fn write_acc_a(&mut self, acc_a: AccA) -> Result<(), SPI, I, O> {
         self._write_register(&acc_a, false, Some(acc_a.value()))
     }
 
@@ -924,28 +943,26 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
         atqa: ATQA,
         sak: SAK,
         cascade_level_filter: impl IntoIterator<Item = UID>,
-    ) -> Result<(), St25r95Error<E>> {
+    ) -> Result<(), SPI, I, O> {
         let mut clf_len = 0;
         let mut data = [0u8; 15];
         data[0..2].copy_from_slice(&atqa.to_le_bytes());
         data[2] = sak;
         for uid in cascade_level_filter.into_iter() {
             if clf_len > 3 {
-                return Err(St25r95Error::InvalidCascadeLevelFilterCount(clf_len));
+                return Err(Error::InvalidCascadeLevelFilterCount(clf_len));
             }
             data[3 + clf_len..3 + clf_len + uid.len()].copy_from_slice(uid.as_slice());
             clf_len += 1;
         }
         if clf_len == 0 {
-            return Err(St25r95Error::InvalidCascadeLevelFilterCount(clf_len));
+            return Err(Error::InvalidCascadeLevelFilterCount(clf_len));
         }
         self.send_command(Command::ACFilter, &data[..3 + clf_len])?;
 
-        // TODO? add polling
-
         let response = self.read()?;
         if response.len != 0 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response,
             })
@@ -954,43 +971,38 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
         }
     }
 
-    fn ac_filter_state(&mut self, data: &[u8]) -> Result<AntiColState, St25r95Error<E>> {
+    fn ac_filter_state(&mut self, data: &[u8]) -> Result<AntiColState, SPI, I, O> {
         self.send_command(Command::ACFilter, data)?;
-
-        // TODO? add polling
 
         let response = self.read()?;
         if response.len != 1 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 1,
                 actual: response,
             })
         } else {
-            AntiColState::try_from(self.buf[0])
-                .map_err(|_| St25r95Error::InvalidAntiColState(self.buf[0]))
+            AntiColState::try_from(self.buf[0]).map_err(|_| Error::InvalidAntiColState(self.buf[0]))
         }
     }
 
     /// This command de-activates the anti-collision filter in Type A card emulation mode.
-    pub fn deactivate_ac_filter(&mut self) -> Result<AntiColState, St25r95Error<E>> {
+    pub fn deactivate_ac_filter(&mut self) -> Result<AntiColState, SPI, I, O> {
         self.ac_filter_state(&[])
     }
 
     /// This command read the Anti-Collision Filter state in Type A card emulation mode.
     /// Does not de-activate the filter.
-    pub fn anti_collision_state(&mut self) -> Result<AntiColState, St25r95Error<E>> {
+    pub fn anti_collision_state(&mut self) -> Result<AntiColState, SPI, I, O> {
         self.ac_filter_state(&[0x00, 0x00])
     }
 
     /// This command sets the Anti-Collision Filter state in Type A card emulation mode.
-    pub fn set_anti_collision_state(&mut self, state: AntiColState) -> Result<(), St25r95Error<E>> {
+    pub fn set_anti_collision_state(&mut self, state: AntiColState) -> Result<(), SPI, I, O> {
         self.send_command(Command::ACFilter, &[state as u8])?;
-
-        // TODO? add polling
 
         let response = self.read()?;
         if response.len != 0 {
-            Err(St25r95Error::InvalidResponseLength {
+            Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response,
             })
@@ -1000,7 +1012,7 @@ impl<'a, E: Debug, C: Callbacks<Error = E> + Copy>
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct ReadResponse {
     pub code: u8,
     pub len: u16,

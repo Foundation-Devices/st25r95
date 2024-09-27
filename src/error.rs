@@ -1,39 +1,29 @@
 // SPDX-FileCopyrightText: 2023 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
+use {
+    crate::ReadResponse,
+    derive_more::From,
+    embedded_hal::{
+        digital::{InputPin, OutputPin},
+        spi::SpiDevice,
+    },
+};
 
-use {crate::ReadResponse, core::fmt::Debug};
-
-#[derive(Debug, PartialEq)]
-pub enum St25r95Error<E: Debug> {
-    SpiError(E),
+#[derive(Copy, Clone, Debug, From, PartialEq)]
+pub enum Error<SPI, I, O> {
+    // #[from]
+    Spi(SPI),
+    // #[from]
+    IrqOut(I),
+    // #[from]
+    IrqIn(O),
+    #[from]
+    UTF8(core::str::Utf8Error),
     PollTimeout,
     IdentificationError,
     InternalBufferOverflow,
 
-    // Hardware Errors from chip
-    EmdSOFerror23, // SOF error in high part (duration 2 to 3 etu) in ISO/IEC 14443B
-    EmdSOFerror10, // SOF error in low part (duration 10 to 11 etu) in ISO/IEC 14443B
-    EmdEgt,        // Error Extended Guard Time error in ISO/IEC 14443B
-    TrlTooBig,     // Too long TR1 send by the card, reception stopped in ISO/IEC 14443BT
-    TrlTooSmall,   // Too small TR1 send by the card in ISO/IEC 14443B
-    Internal,      // Wong frame format decodes
-    FrameRecvOK,   // Frame correctly received (additionally see CRC/Parity information)
-    InvalidCommandLength, // Invalid command length
-    InvalidProtocol, // Invalid protocol
-    UserStop,      // Stopped by user (used only in Card mode)
-    CommunicationError, // Hardware communication error
-    FrameTimeoutOrNoTag, // Frame wait time out (no valid reception)
-    InvalidSof,    // Invalid SOF
-    RxBufferOverflow, // Too many bytes received and data still arriving
-    FramingError,  // if start bit = 1 or stop bit = 0
-    EgtTimeout,    // EGT time out
-    InvalidLength, // Valid for FeliCa™, if Length <3
-    CrcError,      // CRC error, Valid only for FeliCa™
-    ReceptionLostWithoutEof, // When reception is lost without EOF received (or subcarrier was lost)
-    NoField,       // When Listen command detects the absence of external field
-    UintByte,      /* Residual bits in last byte. Useful for ACK/NAK reception of ISO/IEC 14443
-                    * Type A. */
-    UnknownError(u8),
+    Hw(St25r95Error),
 
     InvalidModulationIndex(u8),
     InvalidReceiverGain(u8),
@@ -69,7 +59,34 @@ pub enum St25r95Error<E: Debug> {
     EchoFailed,
 }
 
-impl<E: Debug> From<u8> for St25r95Error<E> {
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum St25r95Error {
+    EmdSOFerror23,        // SOF error in high part (duration 2 to 3 etu) in ISO/IEC 14443B
+    EmdSOFerror10,        // SOF error in low part (duration 10 to 11 etu) in ISO/IEC 14443B
+    EmdEgt,               // Error Extended Guard Time error in ISO/IEC 14443B
+    TrlTooBig,            // Too long TR1 send by the card, reception stopped in ISO/IEC 14443BT
+    TrlTooSmall,          // Too small TR1 send by the card in ISO/IEC 14443B
+    Internal,             // Wong frame format decodes
+    FrameRecvOK,          // Frame correctly received (additionally see CRC/Parity information)
+    InvalidCommandLength, // Invalid command length
+    InvalidProtocol,      // Invalid protocol
+    UserStop,             // Stopped by user (used only in Card mode)
+    CommunicationError,   // Hardware communication error
+    FrameTimeoutOrNoTag,  // Frame wait time out (no valid reception)
+    InvalidSof,           // Invalid SOF
+    RxBufferOverflow,     // Too many bytes received and data still arriving
+    FramingError,         // if start bit = 1 or stop bit = 0
+    EgtTimeout,           // EGT time out
+    InvalidLength,        // Valid for FeliCa™, if Length <3
+    CrcError,             // CRC error, Valid only for FeliCa™
+    ReceptionLostWithoutEof, // When reception is lost without EOF received (or subcarrier was lost)
+    NoField,              // When Listen command detects the absence of external field
+    UintByte,             /* Residual bits in last byte. Useful for ACK/NAK reception of
+                           * ISO/IEC 14443 Type A. */
+    UnknownError(u8),
+}
+
+impl From<u8> for St25r95Error {
     fn from(code: u8) -> Self {
         match code {
             0x63 => St25r95Error::EmdSOFerror23,
@@ -97,3 +114,6 @@ impl<E: Debug> From<u8> for St25r95Error<E> {
         }
     }
 }
+
+pub type Result<T, SPI: SpiDevice, I: InputPin, O: OutputPin> =
+    core::result::Result<T, Error<SPI::Error, I::Error, O::Error>>;

@@ -1,4 +1,4 @@
-use {super::Register, crate::St25r95Error, core::fmt::Debug};
+use {super::Register, crate::Error, core::fmt::Debug};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ModulationIndex {
@@ -81,15 +81,15 @@ impl Register for ArcB {
 }
 
 impl ArcB {
-    pub(crate) fn from_u8<E: Debug>(data: u8) -> Result<Self, St25r95Error<E>> {
+    pub(crate) fn from_u8<SPI, I, O>(data: u8) -> Result<Self, Error<SPI, I, O>> {
         let modulation_index = (data >> 4) & 0xf;
         let modulation_index = modulation_index
             .try_into()
-            .map_err(|_| St25r95Error::InvalidModulationIndex(modulation_index))?;
+            .map_err(|_| Error::InvalidModulationIndex(modulation_index))?;
         let receiver_gain = data & 0xf;
         let receiver_gain = receiver_gain
             .try_into()
-            .map_err(|_| St25r95Error::InvalidReceiverGain(receiver_gain))?;
+            .map_err(|_| Error::InvalidReceiverGain(receiver_gain))?;
         Ok(Self {
             modulation_index,
             receiver_gain,
@@ -110,12 +110,16 @@ mod tests {
     use super::*;
 
     #[derive(Debug, PartialEq)]
-    struct TestError {}
+    struct SPI;
+    #[derive(Debug, PartialEq)]
+    struct I;
+    #[derive(Debug, PartialEq)]
+    struct O;
 
     #[test]
     pub fn test_arc_b_from_u8() {
         assert_eq!(
-            ArcB::from_u8::<TestError>(0x23),
+            ArcB::from_u8::<SPI, I, O>(0x23),
             Ok(ArcB {
                 modulation_index: ModulationIndex::Percent17,
                 receiver_gain: ReceiverGain::Db27,
@@ -125,16 +129,16 @@ mod tests {
             .iter()
             .for_each(|i| {
                 assert_eq!(
-                    ArcB::from_u8::<TestError>(*i << 4 | 0xf),
-                    Err(St25r95Error::InvalidModulationIndex(*i))
+                    ArcB::from_u8::<SPI, I, O>(*i << 4 | 0xf),
+                    Err(Error::InvalidModulationIndex(*i))
                 );
             });
         [0x4, 0x5, 0x6, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE]
             .iter()
             .for_each(|i| {
                 assert_eq!(
-                    ArcB::from_u8::<TestError>(*i | 0x10),
-                    Err(St25r95Error::InvalidReceiverGain(*i))
+                    ArcB::from_u8::<SPI, I, O>(*i | 0x10),
+                    Err(Error::InvalidReceiverGain(*i))
                 );
             });
     }
