@@ -1,8 +1,4 @@
-use {
-    super::Register,
-    crate::{iso15693::Modulation, Protocol, St25r95Error},
-    core::fmt::Debug,
-};
+use {super::Register, crate::St25r95Error, core::fmt::Debug};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ModulationIndex {
@@ -15,6 +11,23 @@ pub enum ModulationIndex {
     Percent95 = 0xD,
 }
 
+impl TryFrom<u8> for ModulationIndex {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x1 => Ok(ModulationIndex::Percent10),
+            0x2 => Ok(ModulationIndex::Percent17),
+            0x3 => Ok(ModulationIndex::Percent25),
+            0x4 => Ok(ModulationIndex::Percent30),
+            0x5 => Ok(ModulationIndex::Percent33),
+            0x6 => Ok(ModulationIndex::Percent36),
+            0xD => Ok(ModulationIndex::Percent95),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ReceiverGain {
     Db34 = 0x0,
@@ -24,148 +37,70 @@ pub enum ReceiverGain {
     Db8 = 0xF,
 }
 
+impl TryFrom<u8> for ReceiverGain {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(ReceiverGain::Db34),
+            0x1 => Ok(ReceiverGain::Db32),
+            0x3 => Ok(ReceiverGain::Db27),
+            0x7 => Ok(ReceiverGain::Db20),
+            0xF => Ok(ReceiverGain::Db8),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Adjusting the Modulation Index and Receiver Gain parameters in reader mode can help to
 /// improve application behavior.
 /// The default values of these parameters are set by the ProtocolSelect command, but they
 /// can be overwritten using the WriteRegister command.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ArcB {
-    pub modulation_index: ModulationIndex,
-    pub receiver_gain: ReceiverGain,
-}
-
-impl ArcB {
-    pub fn new<E: Debug>(
-        protocol: Protocol,
-        modulation: Option<Modulation>,
-        modulation_index: ModulationIndex,
-        receiver_gain: ReceiverGain,
-    ) -> Result<Self, St25r95Error<E>> {
-        // See Table 35
-        match protocol {
-            Protocol::Iso14443A => {
-                if [ModulationIndex::Percent95].contains(&modulation_index) {
-                    Ok(Self {
-                        modulation_index,
-                        receiver_gain,
-                    })
-                } else {
-                    Err(St25r95Error::InvalidModulationIndex {
-                        modulation_index,
-                        protocol,
-                        modulation,
-                    })
-                }
-            }
-            Protocol::Iso14443B | Protocol::FeliCa => {
-                if [
-                    ModulationIndex::Percent10,
-                    ModulationIndex::Percent17,
-                    ModulationIndex::Percent25,
-                    ModulationIndex::Percent30,
-                ]
-                .contains(&modulation_index)
-                {
-                    Ok(Self {
-                        modulation_index,
-                        receiver_gain,
-                    })
-                } else {
-                    Err(St25r95Error::InvalidModulationIndex {
-                        modulation_index,
-                        protocol,
-                        modulation,
-                    })
-                }
-            }
-            Protocol::Iso15693 => match modulation {
-                None => Err(St25r95Error::NoModulationParameter),
-                Some(Modulation::Percent10) => {
-                    if [
-                        ModulationIndex::Percent30,
-                        ModulationIndex::Percent33,
-                        ModulationIndex::Percent36,
-                    ]
-                    .contains(&modulation_index)
-                    {
-                        Ok(Self {
-                            modulation_index,
-                            receiver_gain,
-                        })
-                    } else {
-                        Err(St25r95Error::InvalidModulationIndex {
-                            modulation_index,
-                            protocol,
-                            modulation,
-                        })
-                    }
-                }
-                Some(Modulation::Percent100) => {
-                    if [ModulationIndex::Percent95].contains(&modulation_index) {
-                        Ok(Self {
-                            modulation_index,
-                            receiver_gain,
-                        })
-                    } else {
-                        Err(St25r95Error::InvalidModulationIndex {
-                            modulation_index,
-                            protocol,
-                            modulation,
-                        })
-                    }
-                }
-            },
-            Protocol::FieldOff | Protocol::CardEmulationIso14443A => {
-                Err(St25r95Error::IncompatibleProtocol { protocol })
-            }
-        }
-    }
-
-    pub fn default<E: Debug>(
-        protocol: Protocol,
-        modulation: &Option<Modulation>,
-    ) -> Result<Self, St25r95Error<E>> {
-        // See Table 35
-        match protocol {
-            Protocol::FieldOff | Protocol::CardEmulationIso14443A => {
-                Err(St25r95Error::IncompatibleProtocol { protocol })
-            }
-            Protocol::Iso14443A => Ok(Self {
-                modulation_index: ModulationIndex::Percent95,
-                receiver_gain: ReceiverGain::Db8,
-            }),
-            Protocol::Iso14443B => Ok(Self {
-                modulation_index: ModulationIndex::Percent17,
-                receiver_gain: ReceiverGain::Db34,
-            }),
-            Protocol::FeliCa => Ok(Self {
-                modulation_index: ModulationIndex::Percent33,
-                receiver_gain: ReceiverGain::Db34,
-            }),
-            Protocol::Iso15693 => match modulation {
-                None => Err(St25r95Error::NoModulationParameter),
-                Some(Modulation::Percent10) => Ok(Self {
-                    modulation_index: ModulationIndex::Percent33,
-                    receiver_gain: ReceiverGain::Db27,
-                }),
-                Some(Modulation::Percent100) => Ok(Self {
-                    modulation_index: ModulationIndex::Percent95,
-                    receiver_gain: ReceiverGain::Db27,
-                }),
-            },
-        }
-    }
+    pub(crate) modulation_index: ModulationIndex,
+    pub(crate) receiver_gain: ReceiverGain,
 }
 
 impl Register for ArcB {
-    fn control(&self) -> u8 {
+    fn read_addr(&self) -> u8 {
+        0x69
+    }
+    fn write_addr(&self) -> u8 {
         0x68
     }
-    fn data(&self) -> [u8; 2] {
-        [
-            0x01,
-            (self.modulation_index as u8) << 4 | (self.receiver_gain as u8),
-        ]
+    fn index_confirmation(&self) -> u8 {
+        0x01
+    }
+    fn has_index(&self) -> bool {
+        true
+    }
+    fn value(&self) -> u8 {
+        (self.modulation_index as u8) << 4 | (self.receiver_gain as u8)
+    }
+}
+
+impl ArcB {
+    pub(crate) fn from_u8<E: Debug>(data: u8) -> Result<Self, St25r95Error<E>> {
+        let modulation_index = (data >> 4) & 0xf;
+        let modulation_index = modulation_index
+            .try_into()
+            .map_err(|_| St25r95Error::InvalidModulationIndex(modulation_index))?;
+        let receiver_gain = data & 0xf;
+        let receiver_gain = receiver_gain
+            .try_into()
+            .map_err(|_| St25r95Error::InvalidReceiverGain(receiver_gain))?;
+        Ok(Self {
+            modulation_index,
+            receiver_gain,
+        })
+    }
+
+    pub(crate) fn fake() -> Self {
+        Self {
+            modulation_index: ModulationIndex::Percent17,
+            receiver_gain: ReceiverGain::Db27,
+        }
     }
 }
 
@@ -174,51 +109,33 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     struct TestError {}
 
     #[test]
-    pub fn test_arc_b_data() {
+    pub fn test_arc_b_from_u8() {
         assert_eq!(
-            ArcB::new::<TestError>(
-                Protocol::FeliCa,
-                None,
-                ModulationIndex::Percent17,
-                ReceiverGain::Db27
-            )
-            .unwrap()
-            .data(),
-            [0x01, 0x23]
+            ArcB::from_u8::<TestError>(0x23),
+            Ok(ArcB {
+                modulation_index: ModulationIndex::Percent17,
+                receiver_gain: ReceiverGain::Db27,
+            })
         );
-        assert_eq!(
-            ArcB::default::<TestError>(Protocol::Iso14443A, &None)
-                .unwrap()
-                .data(),
-            [0x01, 0xDF]
-        );
-        assert_eq!(
-            ArcB::default::<TestError>(Protocol::Iso14443B, &None)
-                .unwrap()
-                .data(),
-            [0x01, 0x20]
-        );
-        assert_eq!(
-            ArcB::default::<TestError>(Protocol::FeliCa, &None)
-                .unwrap()
-                .data(),
-            [0x01, 0x50]
-        );
-        assert_eq!(
-            ArcB::default::<TestError>(Protocol::Iso15693, &Some(Modulation::Percent10))
-                .unwrap()
-                .data(),
-            [0x01, 0x53]
-        );
-        assert_eq!(
-            ArcB::default::<TestError>(Protocol::Iso15693, &Some(Modulation::Percent100))
-                .unwrap()
-                .data(),
-            [0x01, 0xD3]
-        );
+        [0x0, 0x7, 0x8, 0x9, 0xA, 0xB, 0xC, 0xE, 0xF]
+            .iter()
+            .for_each(|i| {
+                assert_eq!(
+                    ArcB::from_u8::<TestError>(*i << 4 | 0xf),
+                    Err(St25r95Error::InvalidModulationIndex(*i))
+                );
+            });
+        [0x4, 0x5, 0x6, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE]
+            .iter()
+            .for_each(|i| {
+                assert_eq!(
+                    ArcB::from_u8::<TestError>(*i | 0x10),
+                    Err(St25r95Error::InvalidReceiverGain(*i))
+                );
+            });
     }
 }

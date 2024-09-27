@@ -1,23 +1,14 @@
 // SPDX-FileCopyrightText: 2023 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use {
-    crate::{
-        acc_a::DemodulatorSensitivity,
-        arc_b::ModulationIndex,
-        iso15693::Modulation,
-        Protocol,
-    },
-    core::fmt::Debug,
-};
+use {crate::ReadResponse, core::fmt::Debug};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum St25r95Error<E: Debug> {
     SpiError(E),
     PollTimeout,
     IdentificationError,
     InternalBufferOverflow,
-    ProtocolNotSelected,
 
     // Hardware Errors from chip
     EmdSOFerror23, // SOF error in high part (duration 2 to 3 etu) in ISO/IEC 14443B
@@ -44,25 +35,15 @@ pub enum St25r95Error<E: Debug> {
                     * Type A. */
     UnknownError(u8),
 
-    NoModulationParameter,
-    IncompatibleProtocol {
-        protocol: Protocol,
-    },
-    InvalidModulationIndex {
-        modulation_index: ModulationIndex,
-        protocol: Protocol,
-        modulation: Option<Modulation>,
-    },
-    InvalidDemodulatorSensitivity {
-        demodulator_sensitivity: DemodulatorSensitivity,
-        protocol: Protocol,
-    },
+    InvalidModulationIndex(u8),
+    InvalidReceiverGain(u8),
+    InvalidDemodulatorSensitivity(u8),
     InvalidLoadModulationIndex {
         load_modulation_index: u8,
         min: u8,
         max: u8,
-        protocol: Protocol,
     },
+    InvalidRFU(u8),
     InvalidU8Parameter {
         min: u8,
         max: u8,
@@ -70,7 +51,7 @@ pub enum St25r95Error<E: Debug> {
     },
     InvalidResponseLength {
         expected: u16,
-        actual: u16,
+        actual: ReadResponse,
     },
     InvalidWakeUpSource(u8),
     CalibrationNeeded,

@@ -1,8 +1,34 @@
-use {
-    super::Register,
-    crate::{Protocol, St25r95Error},
-    core::fmt::Debug,
-};
+use {super::Register, crate::St25r95Error, core::fmt::Debug};
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct LoadModulationIndex(u8);
+
+impl LoadModulationIndex {
+    pub fn min() -> Self {
+        Self(0x1)
+    }
+
+    pub fn max() -> Self {
+        Self(0xf)
+    }
+}
+
+impl Default for LoadModulationIndex {
+    fn default() -> Self {
+        Self(0x7)
+    }
+}
+
+impl TryFrom<u8> for LoadModulationIndex {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if !(0x1..=0xf).contains(&value) {
+            return Err(());
+        }
+        Ok(LoadModulationIndex(value))
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum DemodulatorSensitivity {
@@ -10,69 +36,64 @@ pub enum DemodulatorSensitivity {
     Percent100 = 0x2,
 }
 
-/// Adjusting the Load modulation index and Demodulator sensitivity parameters in card
-/// emulation mode can help to improve application behavior.
-/// The default values of these parameters are set by the ProtocolSelect command, but they
-/// can be overwritten using the WriteRegister command.
+impl TryFrom<u8> for DemodulatorSensitivity {
+    type Error = ();
 
-#[derive(Debug, Copy, Clone)]
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x1 => Ok(Self::Percent10),
+            0x2 => Ok(Self::Percent100),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct AccA {
-    pub load_modulation_index: u8,
+    pub load_modulation_index: LoadModulationIndex,
     pub demodulator_sensitivity: DemodulatorSensitivity,
 }
 
-impl AccA {
-    pub(crate) fn new<E: Debug>(
-        protocol: Protocol,
-        load_modulation_index: u8,
-        demodulator_sensitivity: DemodulatorSensitivity,
-    ) -> Result<Self, St25r95Error<E>> {
-        // See Table 36
-        match protocol {
-            Protocol::CardEmulationIso14443A => {
-                if demodulator_sensitivity != DemodulatorSensitivity::Percent100 {
-                    Err(St25r95Error::InvalidDemodulatorSensitivity {
-                        demodulator_sensitivity,
-                        protocol,
-                    })
-                } else if !(0x1..=0xf).contains(&load_modulation_index) {
-                    Err(St25r95Error::InvalidLoadModulationIndex {
-                        load_modulation_index,
-                        min: 0x1,
-                        max: 0xf,
-                        protocol,
-                    })
-                } else {
-                    Ok(Self {
-                        load_modulation_index,
-                        demodulator_sensitivity,
-                    })
-                }
-            }
-            _ => Err(St25r95Error::IncompatibleProtocol { protocol }),
-        }
+impl Register for AccA {
+    fn read_addr(&self) -> u8 {
+        0x69
     }
-
-    pub fn default<E: Debug>(protocol: Protocol) -> Result<Self, St25r95Error<E>> {
-        // See Table 36
-        Self::new(protocol, 0x7, DemodulatorSensitivity::Percent100)
+    fn write_addr(&self) -> u8 {
+        0x68
     }
-
-    pub fn recommended<E: Debug>(protocol: Protocol) -> Result<Self, St25r95Error<E>> {
-        // See Table 36
-        Self::default(protocol)
+    fn index_confirmation(&self) -> u8 {
+        0x04
+    }
+    fn has_index(&self) -> bool {
+        true
+    }
+    fn value(&self) -> u8 {
+        (self.demodulator_sensitivity as u8) << 4 | self.load_modulation_index.0
     }
 }
 
-impl Register for AccA {
-    fn control(&self) -> u8 {
-        0x68
-    }
-    fn data(&self) -> [u8; 2] {
-        [
-            0x04,
-            (self.demodulator_sensitivity as u8) << 4 | self.load_modulation_index,
-        ]
+impl AccA {
+    pub(crate) fn from_u8<E: Debug>(data: u8) -> Result<Self, St25r95Error<E>> {
+        let load_modulation_index = data & 0xf;
+        let load_modulation_index = load_modulation_index.try_into().map_err(|_| {
+            St25r95Error::InvalidLoadModulationIndex {
+                load_modulation_index,
+                min: 0x1,
+                max: 0xf,
+            }
+        })?;
+        let demodulator_sensitivity = (data >> 4) & 0b11;
+        let demodulator_sensitivity = demodulator_sensitivity
+            .try_into()
+            .map_err(|_| St25r95Error::InvalidDemodulatorSensitivity(demodulator_sensitivity))?;
+        let rfu = data >> 6;
+        match rfu {
+            0 => Ok(Self {
+                load_modulation_index,
+                demodulator_sensitivity,
+            }),
+            _ => Err(St25r95Error::InvalidRFU(rfu)),
+        }
     }
 }
 
@@ -81,26 +102,37 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     struct TestError {}
 
     #[test]
-    pub fn test_acc_a_data() {
+    pub fn test_acc_a_from_u8() {
         assert_eq!(
-            AccA::new::<TestError>(
-                Protocol::CardEmulationIso14443A,
-                5,
-                DemodulatorSensitivity::Percent100
-            )
-            .unwrap()
-            .data(),
-            [0x04, 0x25]
+            AccA::from_u8::<TestError>(0x17),
+            Ok(AccA {
+                load_modulation_index: LoadModulationIndex::default(),
+                demodulator_sensitivity: DemodulatorSensitivity::Percent10
+            })
         );
         assert_eq!(
-            AccA::default::<TestError>(Protocol::CardEmulationIso14443A)
-                .unwrap()
-                .data(),
-            [0x04, 0x27]
+            AccA::from_u8::<TestError>(0x07),
+            Err(St25r95Error::InvalidDemodulatorSensitivity(0x0))
+        );
+        assert_eq!(
+            AccA::from_u8::<TestError>(0x37),
+            Err(St25r95Error::InvalidDemodulatorSensitivity(0x3))
+        );
+        assert_eq!(
+            AccA::from_u8::<TestError>(0x20),
+            Err(St25r95Error::InvalidLoadModulationIndex {
+                load_modulation_index: 0x0,
+                min: 0x1,
+                max: 0xf,
+            })
+        );
+        assert_eq!(
+            AccA::from_u8::<TestError>(0xE7),
+            Err(St25r95Error::InvalidRFU(0x3))
         );
     }
 }

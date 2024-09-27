@@ -29,31 +29,13 @@ pub enum Protocol {
     CardEmulationIso14443A = 0x12,
 }
 
-pub struct ProtocolSelection {
-    pub(crate) protocol: Protocol,
-    pub(crate) parameters: [u8; 8],
-    pub(crate) param_len: usize,
+pub(crate) trait ProtocolParams {
+    fn data(self) -> ([u8; 8], usize);
 }
 
-impl ProtocolSelection {
-    pub fn field_off() -> Self {
-        Self {
-            protocol: Protocol::FieldOff,
-            parameters: [0; 8],
-            param_len: 0,
-        }
-    }
-
-    // TODO: find a better way to not have to extract this info
-    pub(crate) fn modulation(&self) -> Option<iso15693::Modulation> {
-        if self.protocol == Protocol::Iso15693 {
-            Some(if self.parameters[0] & 0b0000_0100 == 0 {
-                iso15693::Modulation::Percent100
-            } else {
-                iso15693::Modulation::Percent10
-            })
-        } else {
-            None
-        }
+pub(crate) struct FieldOff;
+impl ProtocolParams for FieldOff {
+    fn data(self) -> ([u8; 8], usize) {
+        ([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1)
     }
 }

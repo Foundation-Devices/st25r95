@@ -1,4 +1,4 @@
-use super::{Protocol, ProtocolSelection};
+use super::ProtocolParams;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub enum DataRate {
@@ -35,7 +35,7 @@ impl FWT {
 }
 
 #[derive(Debug)]
-pub struct Builder {
+pub struct Parameters {
     tx_data_rate: DataRate,
     rx_data_rate: DataRate,
     with_crc: bool,
@@ -45,7 +45,7 @@ pub struct Builder {
     zz: u8,
 }
 
-impl Default for Builder {
+impl Default for Parameters {
     fn default() -> Self {
         Self {
             tx_data_rate: DataRate::default(),
@@ -59,43 +59,7 @@ impl Default for Builder {
     }
 }
 
-impl Builder {
-    pub fn build(self) -> ProtocolSelection {
-        let mut parameters = [0; 8];
-        let mut param_byte = 0;
-        let tx_data_rate_bits = self.tx_data_rate as u8;
-        param_byte |= tx_data_rate_bits << 6;
-        let rx_data_rate_bits = self.rx_data_rate as u8;
-        param_byte |= rx_data_rate_bits << 4;
-        let crc_bit = self.with_crc as u8;
-        param_byte |= crc_bit;
-
-        parameters[0] = param_byte;
-        let mut param_len = 1;
-        if let Some(fdt) = self.fwt {
-            parameters[param_len] = fdt.pp;
-            parameters[param_len + 1] = fdt.mm;
-            parameters[param_len + 2] = fdt.dd;
-            param_len += 3;
-
-            parameters[param_len] = (self.tttt >> 8) as u8;
-            parameters[param_len + 1] = self.tttt as u8;
-            param_len += 2;
-
-            parameters[param_len] = self.yy;
-            param_len += 1;
-
-            parameters[param_len] = self.zz;
-            param_len += 1;
-        };
-
-        ProtocolSelection {
-            protocol: Protocol::Iso14443B,
-            parameters,
-            param_len,
-        }
-    }
-
+impl Parameters {
     pub fn tx_data_rate(self, tx_data_rate: DataRate) -> Self {
         Self {
             tx_data_rate,
@@ -137,6 +101,39 @@ impl Builder {
     }
 }
 
+impl ProtocolParams for Parameters {
+    fn data(self) -> ([u8; 8], usize) {
+        let mut parameters = [0; 8];
+        let mut param_byte = 0;
+        let tx_data_rate_bits = self.tx_data_rate as u8;
+        param_byte |= tx_data_rate_bits << 6;
+        let rx_data_rate_bits = self.rx_data_rate as u8;
+        param_byte |= rx_data_rate_bits << 4;
+        let crc_bit = self.with_crc as u8;
+        param_byte |= crc_bit;
+
+        parameters[0] = param_byte;
+        let mut param_len = 1;
+        if let Some(fdt) = self.fwt {
+            parameters[param_len] = fdt.pp;
+            parameters[param_len + 1] = fdt.mm;
+            parameters[param_len + 2] = fdt.dd;
+            param_len += 3;
+
+            parameters[param_len] = (self.tttt >> 8) as u8;
+            parameters[param_len + 1] = self.tttt as u8;
+            param_len += 2;
+
+            parameters[param_len] = self.yy;
+            param_len += 1;
+
+            parameters[param_len] = self.zz;
+            param_len += 1;
+        };
+        (parameters, param_len)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,34 +149,22 @@ mod tests {
     }
 
     #[test]
-    pub fn test_iso14443b_builder() {
-        assert_parameters(Protocol::Iso14443B, Builder::default().build(), &[0x00]);
-        assert_parameters(
-            Protocol::Iso14443B,
-            Builder::default().with_crc().build(),
-            &[0x01],
+    pub fn test_iso14443b_parameters() {
+        assert_eq!(
+            Parameters::default().data(),
+            ([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1)
         );
-        assert_parameters(
-            Protocol::Iso14443B,
-            Builder::default()
+        assert_eq!(
+            Parameters::default().with_crc().data(),
+            ([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1)
+        );
+        assert_eq!(
+            Parameters::default()
                 .tx_data_rate(DataRate::Kbps424)
                 .rx_data_rate(DataRate::Kbps424)
                 .fwt(FWT::new(1, 2, 3).unwrap())
-                .build(),
-            &[0xA0, 0x01, 0x02, 0x03, 0x03, 0xFF, 0x00, 0x1A],
-        );
-    }
-
-    fn assert_parameters(
-        protocol: Protocol,
-        protocol_selection: ProtocolSelection,
-        expected: &[u8],
-    ) {
-        assert_eq!(protocol_selection.protocol, protocol);
-        assert_eq!(protocol_selection.param_len, expected.len());
-        assert_eq!(
-            protocol_selection.parameters[..protocol_selection.param_len],
-            *expected
+                .data(),
+            ([0xA0, 0x01, 0x02, 0x03, 0x03, 0xFF, 0x00, 0x1A], 8),
         );
     }
 }

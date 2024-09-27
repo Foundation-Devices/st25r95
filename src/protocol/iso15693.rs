@@ -1,4 +1,4 @@
-use super::{Protocol, ProtocolSelection};
+use super::ProtocolParams;
 
 #[derive(Debug, Default)]
 pub enum Speed {
@@ -8,7 +8,7 @@ pub enum Speed {
     Kbps6L = 0b10,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub enum Modulation {
     #[default]
     Percent100 = 0,
@@ -23,7 +23,7 @@ pub enum Subcarrier {
 }
 
 #[derive(Debug, Default)]
-pub struct Builder {
+pub struct Parameters {
     speed: Speed,
     wait_for_sof: bool,
     modulation: Modulation,
@@ -31,9 +31,8 @@ pub struct Builder {
     with_crc: bool,
 }
 
-impl Builder {
-    pub fn build(self) -> ProtocolSelection {
-        let param_len = 1;
+impl ProtocolParams for Parameters {
+    fn data(self) -> ([u8; 8], usize) {
         let mut param_byte = 0x00;
 
         let speed_bits = self.speed as u8;
@@ -51,13 +50,11 @@ impl Builder {
         let crc_bit = self.with_crc as u8;
         param_byte |= crc_bit;
 
-        ProtocolSelection {
-            protocol: Protocol::Iso15693,
-            param_len,
-            parameters: [param_byte, 0, 0, 0, 0, 0, 0, 0],
-        }
+        ([param_byte, 0, 0, 0, 0, 0, 0, 0], 1)
     }
+}
 
+impl Parameters {
     pub fn speed(self, speed: Speed) -> Self {
         Self { speed, ..self }
     }
@@ -71,6 +68,10 @@ impl Builder {
 
     pub fn modulation(self, modulation: Modulation) -> Self {
         Self { modulation, ..self }
+    }
+
+    pub(crate) fn get_modulation(&self) -> Modulation {
+        self.modulation
     }
 
     pub fn subcarrier(self, subcarrier: Subcarrier) -> Self {
@@ -90,110 +91,91 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn test_iso15693_builder() {
+    pub fn test_iso15693_parameters() {
         // H 100 S - crc
-        assert_parameters(Protocol::Iso15693, Builder::default().build(), &[0x00]);
+        assert_eq!(
+            Parameters::default().data(),
+            ([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
+        );
 
         // H 100 S + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default().with_crc().build(),
-            &[0x01],
+        assert_eq!(
+            Parameters::default().with_crc().data(),
+            ([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // H 100 D + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .subcarrier(Subcarrier::Double)
                 .with_crc()
-                .build(),
-            &[0x03],
+                .data(),
+            ([0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // H 10 S + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .modulation(Modulation::Percent10)
                 .with_crc()
-                .build(),
-            &[0x05],
+                .data(),
+            ([0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // H 10 D + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
                 .with_crc()
-                .build(),
-            &[0x07],
+                .data(),
+            ([0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // H 10 D - crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
-                .build(),
-            &[0x06],
+                .data(),
+            ([0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // L 100 S + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default().speed(Speed::Kbps6L).with_crc().build(),
-            &[0x21],
+        assert_eq!(
+            Parameters::default().speed(Speed::Kbps6L).with_crc().data(),
+            ([0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // L 10 S + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .speed(Speed::Kbps6L)
                 .modulation(Modulation::Percent10)
                 .with_crc()
-                .build(),
-            &[0x25],
+                .data(),
+            ([0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // L 10 D + crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .speed(Speed::Kbps6L)
                 .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
                 .with_crc()
-                .build(),
-            &[0x27],
+                .data(),
+            ([0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
 
         // L 10 D - crc
-        assert_parameters(
-            Protocol::Iso15693,
-            Builder::default()
+        assert_eq!(
+            Parameters::default()
                 .speed(Speed::Kbps6L)
                 .modulation(Modulation::Percent10)
                 .subcarrier(Subcarrier::Double)
-                .build(),
-            &[0x26],
-        );
-    }
-
-    fn assert_parameters(
-        protocol: Protocol,
-        protocol_selection: ProtocolSelection,
-        expected: &[u8],
-    ) {
-        assert_eq!(protocol_selection.protocol, protocol);
-        assert_eq!(protocol_selection.param_len, expected.len());
-        assert_eq!(
-            protocol_selection.parameters[..protocol_selection.param_len],
-            *expected
+                .data(),
+            ([0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
         );
     }
 }

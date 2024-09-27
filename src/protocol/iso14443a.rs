@@ -1,4 +1,4 @@
-use super::{Protocol, ProtocolSelection};
+use super::ProtocolParams;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub enum DataRate {
@@ -34,14 +34,14 @@ impl FDT {
 }
 
 #[derive(Debug, Default)]
-pub struct Builder {
+pub struct Parameters {
     tx_data_rate: DataRate,
     rx_data_rate: DataRate,
     fdt: Option<FDT>,
 }
 
-impl Builder {
-    pub fn build(self) -> ProtocolSelection {
+impl ProtocolParams for Parameters {
+    fn data(self) -> ([u8; 8], usize) {
         let mut parameters = [0; 8];
         let mut param_byte = 0;
         let tx_data_rate_bits = self.tx_data_rate as u8;
@@ -58,14 +58,11 @@ impl Builder {
         } else {
             1
         };
-
-        ProtocolSelection {
-            protocol: Protocol::Iso14443A,
-            parameters,
-            param_len,
-        }
+        (parameters, param_len)
     }
+}
 
+impl Parameters {
     pub fn tx_data_rate(self, tx_data_rate: DataRate) -> Self {
         Self {
             tx_data_rate,
@@ -133,29 +130,18 @@ mod tests {
     }
 
     #[test]
-    pub fn test_iso14443a_builder() {
-        assert_parameters(Protocol::Iso14443A, Builder::default().build(), &[0x00]);
-        assert_parameters(
-            Protocol::Iso14443A,
-            Builder::default()
+    pub fn test_iso14443a_parameters() {
+        assert_eq!(
+            Parameters::default().data(),
+            ([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 1)
+        );
+        assert_eq!(
+            Parameters::default()
                 .tx_data_rate(DataRate::Kbps424)
                 .rx_data_rate(DataRate::Kbps424)
                 .fdt(FDT::new(1, 2, 3).unwrap())
-                .build(),
-            &[0xA0, 0x01, 0x02, 0x03],
-        );
-    }
-
-    fn assert_parameters(
-        protocol: Protocol,
-        protocol_selection: ProtocolSelection,
-        expected: &[u8],
-    ) {
-        assert_eq!(protocol_selection.protocol, protocol);
-        assert_eq!(protocol_selection.param_len, expected.len());
-        assert_eq!(
-            protocol_selection.parameters[..protocol_selection.param_len],
-            *expected
+                .data(),
+            ([0xA0, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00], 4),
         );
     }
 }
