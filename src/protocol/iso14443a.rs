@@ -124,6 +124,8 @@ pub mod reader {
 pub mod card_emulation {
     use super::super::ProtocolParams;
 
+    pub type Listen = bool;
+
     #[derive(Debug, Default)]
     pub struct Parameters {
         wait_for_field: bool,

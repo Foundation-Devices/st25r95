@@ -21,7 +21,12 @@ use {
         digital::{InputPin, OutputPin},
         spi::SpiDevice,
     },
-    iso14443a::{card_emulation::AntiColState, ATQA, SAK, UID},
+    iso14443a::{
+        card_emulation::{AntiColState, Listen},
+        ATQA,
+        SAK,
+        UID,
+    },
     iso15693::reader::Modulation,
     timer_window::TimerWindow,
     wakeup::Wakeup,
@@ -41,7 +46,7 @@ pub struct FieldOff;
 #[derive(Debug, Default)]
 pub struct Reader;
 #[derive(Debug, Default)]
-pub struct CardEmulation;
+pub struct CardEmulation(Listen);
 
 // Type State Protocol
 #[derive(Debug, Default)]
@@ -74,13 +79,12 @@ pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
     buf: &'a mut [u8],
     dac_ref: Option<u8>,
     dac_guard: u8,
-    listen_mode: bool,
     field: PhantomData<F>,
-    role: PhantomData<R>,
+    role: R,
     protocol: P,
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Default>
     St25r95<'a, SPI, D, I, O, FieldOff, R, P>
 {
     pub fn new(
@@ -90,6 +94,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
         irq_in: O,
         buf: &'a mut [u8],
     ) -> Result<Self, SPI, I, O> {
+        // do not assume any state
         let mut st25r95 = Self {
             spi,
             delay,
@@ -98,32 +103,39 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
             buf,
             dac_ref: None,
             dac_guard: 0,
-            listen_mode: false,
             field: PhantomData,
-            role: PhantomData,
+            role: R::default(),
             protocol: P::default(),
         };
         // Startup sequence §3.2
         st25r95.irq_in.set_high().map_err(Error::IrqIn)?;
         st25r95.delay.delay_us(150); // t0 > 100us
         st25r95.irq_in_pulse_low()?;
-        st25r95.delay.delay_ms(15); // t3 > 10ms
-
-        //TODO: enter Ready State
+        // should be in Ready state
+        st25r95.reset()?;
+        let (idn_str, _) = st25r95.idn()?;
+        if !idn_str.starts_with("NFC") {
+            return Err(Error::IdentificationError);
+        }
         Ok(st25r95)
     }
 
-    pub fn init(&mut self) -> Result<(), SPI, I, O> {
-        self.reset()?;
-        let (idn_str, _) = self.idn()?;
-        if !idn_str.starts_with("NFC") {
-            return Err(Error::IdentificationError);
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    pub fn echo(&mut self) -> Result<(), SPI, I, O> {
+        self.send_command(Command::Echo, &[])?;
+
+        self.send_control(Control::Read)?;
+        let response_buf = &mut self.buf[..1];
+        self.spi.read(response_buf).map_err(Error::Spi)?;
+        if self.buf[0] != Command::Echo as u8 {
+            return Err(Error::EchoFailed);
         }
         Ok(())
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Default>
     St25r95<'a, SPI, D, I, O, FieldOn, R, P>
 {
     pub fn field_off(mut self) -> ResultSt25r95FieldOff<'a, SPI, D, I, O, R, P> {
@@ -136,9 +148,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R, P: Default>
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
-            listen_mode: self.listen_mode,
             field: PhantomData::<FieldOff>,
-            role: PhantomData,
+            role: R::default(),
             protocol: P::default(),
         })
     }
@@ -150,12 +161,17 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     fn irq_in_pulse_low(&mut self) -> Result<(), SPI, I, O> {
         self.irq_in.set_low().map_err(Error::IrqIn)?;
         self.delay.delay_us(20); // t1 > 10us
-        self.irq_in.set_high().map_err(Error::IrqIn)
+        self.irq_in.set_high().map_err(Error::IrqIn)?;
+        self.delay.delay_ms(15); // t3 > 10ms
+
+        // should be in Ready state
+        Ok(())
     }
 
-    fn reset(&mut self) -> Result<(), SPI, I, O> {
-        // self.irq_in_pulse_low()?;
+    pub fn reset(&mut self) -> Result<(), SPI, I, O> {
         self.send_control(Control::Reset)?;
+        // should be in Power-up state
+        self.irq_in_pulse_low()?;
         Ok(())
     }
 
@@ -272,7 +288,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         let resp = &self.buf[..response.len.into()];
 
         let idn_str = from_utf8(&resp[..13])?;
-        let rom_crc = ((resp[13] as u16) << 8) | resp[14] as u16; // TODO: check endianness
+        let rom_crc = ((resp[13] as u16) << 8) | resp[14] as u16; // §4.1.1 SPI communication is MSB first.
         Ok((idn_str, rom_crc))
     }
 
@@ -317,9 +333,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
-            listen_mode: self.listen_mode,
             field: PhantomData::<FieldOn>,
-            role: PhantomData::<Reader>,
+            role: Reader,
             protocol: Iso15693(modulation),
         })
     }
@@ -339,9 +354,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
-            listen_mode: self.listen_mode,
             field: PhantomData::<FieldOn>,
-            role: PhantomData::<Reader>,
+            role: Reader,
             protocol: Iso14443A,
         })
     }
@@ -361,9 +375,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
-            listen_mode: self.listen_mode,
             field: PhantomData::<FieldOn>,
-            role: PhantomData::<Reader>,
+            role: Reader,
             protocol: Iso14443B,
         })
     }
@@ -383,9 +396,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
-            listen_mode: self.listen_mode,
             field: PhantomData::<FieldOn>,
-            role: PhantomData::<Reader>,
+            role: Reader,
             protocol: FeliCa,
         })
     }
@@ -405,9 +417,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             buf: self.buf,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
-            listen_mode: self.listen_mode,
             field: PhantomData::<FieldOn>,
-            role: PhantomData::<CardEmulation>,
+            role: CardEmulation(false),
             protocol: Iso14443A,
         })
     }
@@ -445,6 +456,9 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         mut params: IdleParams,
         check_params: bool,
     ) -> Result<WakeUpSource, SPI, I, O> {
+        if self.irq_out.is_none() {
+            return Err(Error::NoIrqOut);
+        }
         if check_params && params.wus.tag_detection {
             match self.dac_ref {
                 None => return Err(Error::CalibrationNeeded),
@@ -478,6 +492,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             self.buf[0]
                 .try_into()
                 .map_err(|_| Error::InvalidWakeUpSource(self.buf[0]))
+            // should be in WaitForEvent state
         }
     }
 
@@ -558,45 +573,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             .try_into()
             .map_err(|_| Error::InvalidWakeUpSource(value))
     }
-
-    /// The Echo command verifies the possibility of communication between a Host and the
-    /// ST25R95. The ST25R95 will exit the listen mode upon reception of an echo command.
-    /// This can be used to stop listen mode.
-    // TODO Listen Mode is specific to CardEmulation
-    pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.send_command(Command::Echo, &[])?;
-
-        self.send_control(Control::Read)?;
-        let response_buf = &mut self.buf[..if self.listen_mode { 3 } else { 1 }];
-        self.spi.read(response_buf).map_err(Error::Spi)?;
-        if self.buf[0] != Command::Echo as u8 {
-            return Err(Error::EchoFailed);
-        }
-        if self.listen_mode {
-            let response = ReadResponse::new(&self.buf[1..3].try_into().unwrap());
-            if response.code != 0x85 {
-                return Err(Error::EchoFailed);
-            }
-            if response.len != 0 {
-                return Err(Error::InvalidResponseLength {
-                    expected: 0,
-                    actual: response,
-                });
-            }
-            self.listen_mode = false; // Listening mode was cancelled by the application
-        }
-        Ok(())
-    }
 }
-
-/// The WriteRegister command is used to:
-/// • set the TimerWindow value used to improve ST25R95 demodulation when
-///   communicating with ISO/IEC 14443 Type A tags
-/// • set the AutoDetect Filter used to help synchronization of ST25R95 with FeliCa™
-///   tags
-// • configure the HF2RF bit
-// Note: When the HF2RF bit is ‘0’, Reader mode is possible (default mode). When set
-// to ‘1’, VPS_TX power consumption is reduced (Ready mode).
 
 impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     St25r95<'a, SPI, D, I, O, FieldOn, Reader, P>
@@ -681,6 +658,20 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
 
     pub fn write_arc_b(&mut self, arc_b: ArcB) -> Result<(), SPI, I, O> {
         self._write_register(&arc_b, false, Some(arc_b.value()))
+    }
+
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    pub fn echo(&mut self) -> Result<(), SPI, I, O> {
+        self.send_command(Command::Echo, &[])?;
+
+        self.send_control(Control::Read)?;
+        let response_buf = &mut self.buf[..1];
+        self.spi.read(response_buf).map_err(Error::Spi)?;
+        if self.buf[0] != Command::Echo as u8 {
+            return Err(Error::EchoFailed);
+        }
+        Ok(())
     }
 }
 
@@ -866,7 +857,6 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     /// If no command from an external reader has been received, then the Echo command
     /// must be used to exit the Listening mode prior to sending a new command to the
     /// ST25R95.
-    //TODO: handle Listen Mode with a new type state pattern
     pub fn listen(&mut self) -> Result<(), SPI, I, O> {
         self.send_command(Command::Listen, &[])?;
 
@@ -877,12 +867,42 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
                 actual: response,
             })
         } else {
-            self.listen_mode = true;
+            self.role.0 = true;
             Ok(())
         }
     }
 
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    /// The ST25R95 will exit the listen mode upon reception of an echo command.
+    /// This can be used to stop listen mode.
+    pub fn echo(&mut self) -> Result<(), SPI, I, O> {
+        self.send_command(Command::Echo, &[])?;
+
+        self.send_control(Control::Read)?;
+        let response_buf = &mut self.buf[..if self.role.0 { 3 } else { 1 }];
+        self.spi.read(response_buf).map_err(Error::Spi)?;
+        if self.buf[0] != Command::Echo as u8 {
+            return Err(Error::EchoFailed);
+        }
+        if self.role.0 {
+            let response = ReadResponse::new(&self.buf[1..3].try_into().unwrap());
+            if response.code != 0x85 {
+                return Err(Error::EchoFailed);
+            }
+            if response.len != 0 {
+                return Err(Error::InvalidResponseLength {
+                    expected: 0,
+                    actual: response,
+                });
+            }
+            self.role.0 = false; // Listening mode was cancelled by the application
+        }
+        Ok(())
+    }
+
     /// Receive data from the reader through the ST25R95 in Listen mode.
+    /// Will be blocking until data is available.
     pub fn receive(&mut self) -> Result<(u8, &[u8]), SPI, I, O> {
         let response = self.read()?;
         Ok((response.code, &self.buf[..response.len as usize]))

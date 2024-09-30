@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
+
 use {
     crate::ReadResponse,
     derive_more::From,
@@ -20,6 +21,7 @@ pub enum Error<SPI, I, O> {
     #[from]
     UTF8(core::str::Utf8Error),
     PollTimeout,
+    NoIrqOut,
     IdentificationError,
     InternalBufferOverflow,
 
