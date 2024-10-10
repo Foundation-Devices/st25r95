@@ -14,7 +14,7 @@ use {
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
     arc_b::{ArcB, ModulationIndex, ReceiverGain},
     auto_detect_filter::AutoDetectFilter,
-    command::{CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
+    command::{CtrlResConf, DacData, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     embedded_hal::{
         delay::DelayNs,
@@ -32,7 +32,7 @@ use {
     wakeup::Wakeup,
 };
 pub use {
-    crate::{control::PollFlags, protocol::*, register::*},
+    crate::{command::IdleParams, control::PollFlags, protocol::*, register::*},
     error::{Error, Result},
 };
 
@@ -43,20 +43,24 @@ pub struct FieldOn;
 pub struct FieldOff;
 
 // Type State Role
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Reader;
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CardEmulation(Listen);
+#[derive(Debug)]
+pub struct NoRole;
 
 // Type State Protocol
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Iso15693(Modulation);
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Iso14443A;
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Iso14443B;
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FeliCa;
+#[derive(Debug)]
+pub struct NoProtocol;
 
 type ResultSt25r95FieldOff<'a, SPI, D, I, O, R, P> =
     Result<St25r95<'a, SPI, D, I, O, FieldOff, R, P>, SPI, I, O>;
@@ -71,6 +75,8 @@ type ResultSt25r95ReaderFelica<'a, SPI, D, I, O> =
 type ResultSt25r95CardEmulationIso14443A<'a, SPI, D, I, O> =
     Result<St25r95<'a, SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>, SPI, I, O>;
 
+pub const MAX_BUFFER_SIZE: usize = 530;
+
 pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
     spi: SPI,
     delay: D,
@@ -84,8 +90,8 @@ pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
     protocol: P,
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Default>
-    St25r95<'a, SPI, D, I, O, FieldOff, R, P>
+impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+    St25r95<'a, SPI, D, I, O, FieldOff, NoRole, NoProtocol>
 {
     pub fn new(
         spi: SPI,
@@ -104,8 +110,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: D
             dac_ref: None,
             dac_guard: 0,
             field: PhantomData,
-            role: R::default(),
-            protocol: P::default(),
+            role: NoRole,
+            protocol: NoProtocol,
         };
         // Startup sequence §3.2
         st25r95.irq_in.set_high().map_err(Error::IrqIn)?;
