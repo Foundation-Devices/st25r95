@@ -5,7 +5,7 @@ use bitflags::bitflags;
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum Control {
-    Command = 0x00,
+    Send = 0x00,
     Reset = 0x01,
     Read = 0x02,
     Poll = 0x03,

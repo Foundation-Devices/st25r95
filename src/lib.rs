@@ -80,7 +80,7 @@ pub const MAX_BUFFER_SIZE: usize = 530;
 pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
     spi: SPI,
     delay: D,
-    irq_out: Option<I>,
+    irq_out: I,
     irq_in: O,
     buf: &'a mut [u8],
     dac_ref: Option<u8>,
@@ -96,7 +96,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     pub fn new(
         spi: SPI,
         delay: D,
-        irq_out: Option<I>,
+        irq_out: I,
         irq_in: O,
         buf: &'a mut [u8],
     ) -> Result<Self, SPI, I, O> {
@@ -114,8 +114,6 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
             protocol: NoProtocol,
         };
         // Startup sequence §3.2
-        st25r95.irq_in.set_high().map_err(Error::IrqIn)?;
-        st25r95.delay.delay_us(150); // t0 > 100us
         st25r95.irq_in_pulse_low()?;
         // should be in Ready state
         st25r95.reset()?;
@@ -129,15 +127,25 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95.
     pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.send_command(Command::Echo, &[])?;
+        self.poll_spi(PollFlags::CAN_SEND)?;
 
-        self.send_control(Control::Read)?;
-        let response_buf = &mut self.buf[..1];
-        self.spi.read(response_buf).map_err(Error::Spi)?;
-        if self.buf[0] != Command::Echo as u8 {
-            return Err(Error::EchoFailed);
+        self.buf[0] = Control::Send as u8;
+        self.buf[1] = Command::Echo as u8;
+        self.spi.write(&self.buf[..2]).map_err(Error::Spi)?;
+
+        self.poll_irq_out(100)?;
+
+        self.buf[0] = Control::Read as u8;
+        self.buf[1] = 0;
+        self.spi
+            .transfer_in_place(&mut self.buf[..2])
+            .map_err(Error::Spi)?;
+        if self.buf[0] == Command::Echo as u8 {
+            Ok(())
+        } else {
+            //TODO: flush Chip SPI buffer
+            Err(Error::EchoFailed)
         }
-        Ok(())
     }
 }
 
@@ -165,79 +173,52 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     St25r95<'a, SPI, D, I, O, F, R, P>
 {
     fn irq_in_pulse_low(&mut self) -> Result<(), SPI, I, O> {
-        self.irq_in.set_low().map_err(Error::IrqIn)?;
-        self.delay.delay_us(20); // t1 > 10us
         self.irq_in.set_high().map_err(Error::IrqIn)?;
-        self.delay.delay_ms(15); // t3 > 10ms
+        self.delay.delay_ms(1); // t0 > 100us
+        self.irq_in.set_low().map_err(Error::IrqIn)?;
+        self.delay.delay_ms(1); // t1 > 10us
+        self.irq_in.set_high().map_err(Error::IrqIn)?;
+        self.delay.delay_ms(11); // t3 > 10ms
 
         // should be in Ready state
         Ok(())
     }
 
-    pub fn reset(&mut self) -> Result<(), SPI, I, O> {
-        self.send_control(Control::Reset)?;
+    fn reset(&mut self) -> Result<(), SPI, I, O> {
+        self.spi
+            .write(&[Control::Reset as u8])
+            .map_err(Error::Spi)?;
+        self.delay.delay_ms(3);
         // should be in Power-up state
         self.irq_in_pulse_low()?;
         Ok(())
     }
 
-    fn send_control(&mut self, ctrl: Control) -> Result<u8, SPI, I, O> {
-        let mut dummy = [0];
-        self.spi
-            .transfer(&mut dummy, &[ctrl as u8])
-            .map_err(Error::Spi)?;
-        Ok(dummy[0])
-    }
-
     fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<(), SPI, I, O> {
-        if data.len() >= self.buf.len() {
+        if data.len() > self.buf.len() - 3 {
             return Err(Error::InternalBufferOverflow);
         }
 
-        // self.irq_in_pulse_low()?;
+        self.buf[0] = Control::Send as u8;
+        self.buf[1] = cmd as u8;
+        self.buf[2] = data.len() as u8;
+        self.buf[3..3 + data.len()].copy_from_slice(data);
 
-        // Clear the dummy buffer for the data that'll go over the SPI bus
-        let dummy = &mut self.buf[..data.len()];
-        dummy.fill(0);
-
-        self.send_control(Control::Command)?;
-
-        // Send command header
-        let header_dummy = &mut self.buf[..2];
         self.spi
-            .transfer(header_dummy, &[cmd as u8, data.len() as u8])
-            .map_err(Error::Spi)?;
-        header_dummy.fill(0);
-
-        // Send command data
-        let data_dummy = &mut self.buf[..data.len()];
-        self.spi.transfer(data_dummy, data).map_err(Error::Spi)?;
-        Ok(())
+            .write(&self.buf[..3 + data.len()])
+            .map_err(Error::Spi)
     }
 
-    fn poll(
-        &mut self,
-        timeout: impl Into<Option<u32>> + Copy,
-        flags: PollFlags,
-    ) -> Result<(), SPI, I, O> {
+    fn poll_irq_out(&mut self, timeout: impl Into<Option<u32>> + Copy) -> Result<(), SPI, I, O> {
         let mut curr_timeout = 0u32;
-
-        // self.irq_in_pulse_low()?;
-
         loop {
-            if let Some(irq_out) = &mut self.irq_out {
-                if irq_out.is_low().map_err(Error::IrqOut)? {
-                    return Ok(());
-                }
-            } else {
-                let curr_flags = PollFlags::from_bits_truncate(self.send_control(Control::Poll)?);
-                if curr_flags.contains(flags) {
-                    return Ok(());
-                }
+            if self.irq_out.is_low().map_err(Error::IrqOut)? {
+                return Ok(());
             }
 
             if let Some(timeout) = timeout.into() {
                 if curr_timeout > timeout {
+                    //TODO: flush Chip SPI buffer
                     return Err(Error::PollTimeout);
                 }
 
@@ -247,20 +228,31 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         }
     }
 
-    fn read(&mut self) -> Result<ReadResponse, SPI, I, O> {
-        // self.irq_in_pulse_low()?;
-        self.poll(None, PollFlags::CAN_READ)?;
-
-        self.send_control(Control::Read)?;
-
-        let mut response_header_buf = [0u8; 2];
+    fn poll_spi(&mut self, flags: PollFlags) -> Result<(), SPI, I, O> {
+        let mut curr_flags = [0; 2];
         self.spi
-            .read(response_header_buf.as_mut_slice())
+            .transfer(&mut curr_flags, &[Control::Poll as u8, Control::Poll as u8])
+            .map_err(Error::Spi)?;
+        match PollFlags::from_bits_truncate(curr_flags[1]).contains(flags) {
+            true => Ok(()),
+            false => Err(Error::PollTimeout),
+        }
+    }
+
+    fn read(&mut self) -> Result<ReadResponse, SPI, I, O> {
+        self.poll_irq_out(100)?;
+
+        self.buf[0] = Control::Read as u8;
+        self.spi
+            .transfer_in_place(&mut self.buf[..2])
             .map_err(Error::Spi)?;
 
-        let response = ReadResponse::new(&response_header_buf);
+        //TODO: how to keep CS low after read header
+
+        let response = ReadResponse::new(&self.buf[1..3]);
         if response.len != 0 {
             if response.len as usize > self.buf.len() {
+                //TODO: flush Chip SPI buffer
                 return Err(Error::InvalidResponseLength {
                     expected: self.buf.len() as u16,
                     actual: response,
@@ -462,9 +454,6 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         mut params: IdleParams,
         check_params: bool,
     ) -> Result<WakeUpSource, SPI, I, O> {
-        if self.irq_out.is_none() {
-            return Err(Error::NoIrqOut);
-        }
         if check_params && params.wus.tag_detection {
             match self.dac_ref {
                 None => return Err(Error::CalibrationNeeded),
@@ -669,15 +658,25 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95.
     pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.send_command(Command::Echo, &[])?;
+        self.poll_spi(PollFlags::CAN_SEND)?;
 
-        self.send_control(Control::Read)?;
-        let response_buf = &mut self.buf[..1];
-        self.spi.read(response_buf).map_err(Error::Spi)?;
-        if self.buf[0] != Command::Echo as u8 {
-            return Err(Error::EchoFailed);
+        self.buf[0] = Control::Send as u8;
+        self.buf[1] = Command::Echo as u8;
+        self.spi.write(&self.buf[..2]).map_err(Error::Spi)?;
+
+        self.poll_irq_out(100)?;
+
+        self.buf[0] = Control::Read as u8;
+        self.buf[1] = 0;
+        self.spi
+            .transfer_in_place(&mut self.buf[..2])
+            .map_err(Error::Spi)?;
+        if self.buf[0] == Command::Echo as u8 {
+            Ok(())
+        } else {
+            //TODO: flush Chip SPI buffer
+            Err(Error::EchoFailed)
         }
-        Ok(())
     }
 }
 
@@ -883,16 +882,27 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     /// The ST25R95 will exit the listen mode upon reception of an echo command.
     /// This can be used to stop listen mode.
     pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.send_command(Command::Echo, &[])?;
+        self.poll_spi(PollFlags::CAN_SEND)?;
 
-        self.send_control(Control::Read)?;
-        let response_buf = &mut self.buf[..if self.role.0 { 3 } else { 1 }];
-        self.spi.read(response_buf).map_err(Error::Spi)?;
+        self.buf[0] = Control::Send as u8;
+        self.buf[1] = Command::Echo as u8;
+        self.spi.write(&self.buf[..2]).map_err(Error::Spi)?;
+
+        self.poll_irq_out(100)?;
+
+        self.buf[0] = Control::Read as u8;
+        self.buf[1] = 0;
+        self.buf[2] = 0;
+        self.buf[3] = 0;
+        self.spi
+            .transfer_in_place(&mut self.buf[..if self.role.0 { 4 } else { 2 }])
+            .map_err(Error::Spi)?;
         if self.buf[0] != Command::Echo as u8 {
+            //TODO: flush Chip SPI buffer
             return Err(Error::EchoFailed);
         }
         if self.role.0 {
-            let response = ReadResponse::new(&self.buf[1..3].try_into().unwrap());
+            let response = ReadResponse::new(&self.buf[1..3]);
             if response.code != 0x85 {
                 return Err(Error::EchoFailed);
             }
@@ -1058,7 +1068,8 @@ pub struct ReadResponse {
 }
 
 impl ReadResponse {
-    pub fn new(header: &[u8; 2]) -> Self {
+    pub fn new(header: &[u8]) -> Self {
+        assert_eq!(header.len(), 2);
         // See datasheet section 4.3 (Support of long frames)
         Self {
             code: header[0],

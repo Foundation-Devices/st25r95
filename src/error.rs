@@ -21,7 +21,6 @@ pub enum Error<SPI, I, O> {
     #[from]
     UTF8(core::str::Utf8Error),
     PollTimeout,
-    NoIrqOut,
     IdentificationError,
     InternalBufferOverflow,
 
