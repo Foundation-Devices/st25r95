@@ -8,6 +8,7 @@ mod control;
 mod error;
 mod protocol;
 mod register;
+mod spi;
 
 use {
     crate::{command::Command, control::Control},
@@ -19,7 +20,6 @@ use {
     embedded_hal::{
         delay::DelayNs,
         digital::{InputPin, OutputPin},
-        spi::SpiDevice,
     },
     iso14443a::{
         card_emulation::{AntiColState, Listen},
@@ -34,6 +34,7 @@ use {
 pub use {
     crate::{command::IdleParams, control::PollFlags, protocol::*, register::*},
     error::{Error, Result},
+    spi::St25r95Spi,
 };
 
 // Type State Field
@@ -90,7 +91,7 @@ pub struct St25r95<'a, SPI, D, I, O, F, R, P> {
     protocol: P,
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     St25r95<'a, SPI, D, I, O, FieldOff, NoRole, NoProtocol>
 {
     pub fn new(
@@ -127,7 +128,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95.
     pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.poll_spi(PollFlags::CAN_SEND)?;
+        self.spi.poll(PollFlags::CAN_SEND)?;
 
         self.buf[0] = Control::Send as u8;
         self.buf[1] = Command::Echo as u8;
@@ -149,7 +150,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Default>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Default>
     St25r95<'a, SPI, D, I, O, FieldOn, R, P>
 {
     pub fn field_off(mut self) -> ResultSt25r95FieldOff<'a, SPI, D, I, O, R, P> {
@@ -169,7 +170,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: D
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     St25r95<'a, SPI, D, I, O, F, R, P>
 {
     fn irq_in_pulse_low(&mut self) -> Result<(), SPI, I, O> {
@@ -185,28 +186,11 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     }
 
     fn reset(&mut self) -> Result<(), SPI, I, O> {
-        self.spi
-            .write(&[Control::Reset as u8])
-            .map_err(Error::Spi)?;
+        self.spi.reset()?;
         self.delay.delay_ms(3);
         // should be in Power-up state
         self.irq_in_pulse_low()?;
         Ok(())
-    }
-
-    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<(), SPI, I, O> {
-        if data.len() > self.buf.len() - 3 {
-            return Err(Error::InternalBufferOverflow);
-        }
-
-        self.buf[0] = Control::Send as u8;
-        self.buf[1] = cmd as u8;
-        self.buf[2] = data.len() as u8;
-        self.buf[3..3 + data.len()].copy_from_slice(data);
-
-        self.spi
-            .write(&self.buf[..3 + data.len()])
-            .map_err(Error::Spi)
     }
 
     fn poll_irq_out(&mut self, timeout: impl Into<Option<u32>> + Copy) -> Result<(), SPI, I, O> {
@@ -228,52 +212,14 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         }
     }
 
-    fn poll_spi(&mut self, flags: PollFlags) -> Result<(), SPI, I, O> {
-        let mut curr_flags = [0; 2];
-        self.spi
-            .transfer(&mut curr_flags, &[Control::Poll as u8, Control::Poll as u8])
-            .map_err(Error::Spi)?;
-        match PollFlags::from_bits_truncate(curr_flags[1]).contains(flags) {
-            true => Ok(()),
-            false => Err(Error::PollTimeout),
-        }
-    }
-
     fn read(&mut self) -> Result<ReadResponse, SPI, I, O> {
         self.poll_irq_out(100)?;
-
-        self.buf[0] = Control::Read as u8;
-        self.spi
-            .transfer_in_place(&mut self.buf[..2])
-            .map_err(Error::Spi)?;
-
-        //TODO: how to keep CS low after read header
-
-        let response = ReadResponse::new(&self.buf[1..3]);
-        if response.len != 0 {
-            if response.len as usize > self.buf.len() {
-                //TODO: flush Chip SPI buffer
-                return Err(Error::InvalidResponseLength {
-                    expected: self.buf.len() as u16,
-                    actual: response,
-                });
-            }
-
-            self.spi
-                .read(&mut self.buf[..response.len as usize])
-                .map_err(Error::Spi)?;
-        }
-
-        if response.code == 0 || response.code == 0x80 || response.code == 0x90 {
-            Ok(response)
-        } else {
-            Err(Error::Hw(response.code.into()))
-        }
+        self.spi.read()
     }
 
     /// The IDN command gives brief information about the ST25R95 and its revision.
     pub fn idn(&mut self) -> Result<(&str, u16), SPI, I, O> {
-        self.send_command(Command::Idn, &[])?;
+        self.spi.send_command(Command::Idn, &[])?;
 
         let response = self.read()?;
         if response.len != 15 {
@@ -302,7 +248,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             data[1..1 + data_len].copy_from_slice(&d[..data_len]);
         }
 
-        self.send_command(Command::ProtocolSelect, &data[..1 + data_len])?;
+        self.spi
+            .send_command(Command::ProtocolSelect, &data[..1 + data_len])?;
 
         let response = self.read()?;
         if response.len != 0 {
@@ -430,12 +377,14 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     /// turned ON by the reader.
     pub fn poll_field(&mut self, wff: Option<WaitForField>) -> Result<bool, SPI, I, O> {
         match wff {
-            None => self.send_command(Command::PollField, &[])?,
+            None => self.spi.send_command(Command::PollField, &[])?,
             Some(WaitForField {
                 apparance,
                 presc,
                 timer,
-            }) => self.send_command(Command::PollField, &[apparance as u8, presc, timer])?,
+            }) => self
+                .spi
+                .send_command(Command::PollField, &[apparance as u8, presc, timer])?,
         }
 
         let response = self.read()?;
@@ -475,7 +424,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
                 }
             }
         }
-        self.send_command(Command::Idle, &params.data())?;
+        self.spi.send_command(Command::Idle, &params.data())?;
 
         let response = self.read()?;
         if response.len != 1 {
@@ -525,7 +474,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         } else {
             3
         };
-        self.send_command(Command::WrReg, &data[..data_len])?;
+        self.spi.send_command(Command::WrReg, &data[..data_len])?;
 
         let response = self.read()?;
         if response.len != 0 {
@@ -547,7 +496,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         data[0] = reg.read_addr();
         data[1] = 0x01;
         data[2] = 0x00;
-        self.send_command(Command::RdReg, &data)?;
+        self.spi.send_command(Command::RdReg, &data)?;
 
         let response = self.read()?;
         if response.len != 1 {
@@ -570,14 +519,14 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     St25r95<'a, SPI, D, I, O, FieldOn, Reader, P>
 {
     /// This command sends data to a contactless tag and receives its reply.
     /// If the tag response was received and decoded correctly, the <Data> field can
     /// contain additional information which is protocol-specific.
     pub fn send_receive(&mut self, data: &[u8]) -> Result<(u8, &[u8]), SPI, I, O> {
-        self.send_command(Command::SendRecv, data)?;
+        self.spi.send_command(Command::SendRecv, data)?;
 
         let response = self.read()?;
         Ok((response.code, &self.buf[..response.len as usize]))
@@ -658,7 +607,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95.
     pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.poll_spi(PollFlags::CAN_SEND)?;
+        self.spi.poll(PollFlags::CAN_SEND)?;
 
         self.buf[0] = Control::Send as u8;
         self.buf[1] = Command::Echo as u8;
@@ -680,7 +629,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso15693>
 {
     pub fn new_arc_b(
@@ -720,7 +669,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443A>
 {
     pub fn new_arc_b(
@@ -777,7 +726,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     St25r95<'a, SPI, D, I, O, FieldOn, Reader, Iso14443B>
 {
     pub fn new_arc_b(
@@ -810,7 +759,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     St25r95<'a, SPI, D, I, O, FieldOn, Reader, FeliCa>
 {
     pub fn new_arc_b(
@@ -852,7 +801,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
+impl<'a, SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     St25r95<'a, SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>
 {
     /// In card emulation mode, this function puts the ST25R95 in Listening mode.
@@ -863,7 +812,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     /// must be used to exit the Listening mode prior to sending a new command to the
     /// ST25R95.
     pub fn listen(&mut self) -> Result<(), SPI, I, O> {
-        self.send_command(Command::Listen, &[])?;
+        self.spi.send_command(Command::Listen, &[])?;
 
         let response = self.read()?;
         if response.len != 0 {
@@ -882,7 +831,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     /// The ST25R95 will exit the listen mode upon reception of an echo command.
     /// This can be used to stop listen mode.
     pub fn echo(&mut self) -> Result<(), SPI, I, O> {
-        self.poll_spi(PollFlags::CAN_SEND)?;
+        self.spi.poll(PollFlags::CAN_SEND)?;
 
         self.buf[0] = Control::Send as u8;
         self.buf[1] = Command::Echo as u8;
@@ -926,7 +875,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
 
     /// Immediately sends data to the reader using the Load Modulation method.
     pub fn send(&mut self, data: &[u8]) -> Result<(), SPI, I, O> {
-        self.send_command(Command::Send, data)?;
+        self.spi.send_command(Command::Send, data)?;
 
         let response = self.read()?;
         if response.len != 0 {
@@ -1007,7 +956,8 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
         if clf_len == 0 {
             return Err(Error::InvalidCascadeLevelFilterCount(clf_len));
         }
-        self.send_command(Command::ACFilter, &data[..3 + clf_len])?;
+        self.spi
+            .send_command(Command::ACFilter, &data[..3 + clf_len])?;
 
         let response = self.read()?;
         if response.len != 0 {
@@ -1021,7 +971,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
     }
 
     fn ac_filter_state(&mut self, data: &[u8]) -> Result<AntiColState, SPI, I, O> {
-        self.send_command(Command::ACFilter, data)?;
+        self.spi.send_command(Command::ACFilter, data)?;
 
         let response = self.read()?;
         if response.len != 1 {
@@ -1047,7 +997,7 @@ impl<'a, SPI: SpiDevice, D: DelayNs, I: InputPin, O: OutputPin>
 
     /// This command sets the Anti-Collision Filter state in Type A card emulation mode.
     pub fn set_anti_collision_state(&mut self, state: AntiColState) -> Result<(), SPI, I, O> {
-        self.send_command(Command::ACFilter, &[state as u8])?;
+        self.spi.send_command(Command::ACFilter, &[state as u8])?;
 
         let response = self.read()?;
         if response.len != 0 {
