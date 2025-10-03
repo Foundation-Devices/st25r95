@@ -6,7 +6,7 @@ name = "st25r95"
 version = "0.1.0"
 edition = "2021"
 description = "Driver for ST25R95 integrated transceiver for contactless applications (NFC)"
-rust = "1.81.0"
+rust = "1.86.0"
 
 [dependencies]
 bitflags = { version = "2.6" }
