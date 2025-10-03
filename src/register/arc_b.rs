@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use {super::Register, crate::Error, core::fmt::Debug};
+use {
+    super::Register,
+    crate::{Error, Result},
+    core::fmt::Debug,
+};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ModulationIndex {
@@ -17,7 +21,7 @@ pub enum ModulationIndex {
 impl TryFrom<u8> for ModulationIndex {
     type Error = ();
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
         match value {
             0x1 => Ok(ModulationIndex::Percent10),
             0x2 => Ok(ModulationIndex::Percent17),
@@ -43,7 +47,7 @@ pub enum ReceiverGain {
 impl TryFrom<u8> for ReceiverGain {
     type Error = ();
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
         match value {
             0x0 => Ok(ReceiverGain::Db34),
             0x1 => Ok(ReceiverGain::Db32),
@@ -84,7 +88,7 @@ impl Register for ArcB {
 }
 
 impl ArcB {
-    pub(crate) fn from_u8<SPI, I, O>(data: u8) -> Result<Self, Error<SPI, I, O>> {
+    pub(crate) fn from_u8(data: u8) -> Result<Self> {
         let modulation_index = (data >> 4) & 0xf;
         let modulation_index = modulation_index
             .try_into()
@@ -112,17 +116,10 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, PartialEq)]
-    struct SPI;
-    #[derive(Debug, PartialEq)]
-    struct I;
-    #[derive(Debug, PartialEq)]
-    struct O;
-
     #[test]
     pub fn test_arc_b_from_u8() {
         assert_eq!(
-            ArcB::from_u8::<SPI, I, O>(0x23),
+            ArcB::from_u8(0x23u8),
             Ok(ArcB {
                 modulation_index: ModulationIndex::Percent17,
                 receiver_gain: ReceiverGain::Db27,
@@ -132,7 +129,7 @@ mod tests {
             .iter()
             .for_each(|i| {
                 assert_eq!(
-                    ArcB::from_u8::<SPI, I, O>(*i << 4 | 0xf),
+                    ArcB::from_u8(*i << 4 | 0xf),
                     Err(Error::InvalidModulationIndex(*i))
                 );
             });
@@ -140,7 +137,7 @@ mod tests {
             .iter()
             .for_each(|i| {
                 assert_eq!(
-                    ArcB::from_u8::<SPI, I, O>(*i | 0x10),
+                    ArcB::from_u8(*i | 0x10),
                     Err(Error::InvalidReceiverGain(*i))
                 );
             });

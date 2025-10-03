@@ -1,31 +1,23 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use {
-    crate::ReadResponse,
-    derive_more::From,
-    embedded_hal::{
-        digital::{InputPin, OutputPin},
-        spi::SpiDevice,
-    },
-};
+use derive_more::From;
 
 #[derive(Copy, Clone, Debug, From, PartialEq)]
-pub enum Error<SPI, I, O> {
-    // #[from]
-    Spi(SPI),
-    // #[from]
-    IrqOut(I),
-    // #[from]
-    IrqIn(O),
+pub enum Error {
+    Spi,
+    IrqOut,
+    IrqIn,
     #[from]
     UTF8(core::str::Utf8Error),
+    Vec,
     PollTimeout,
     IdentificationError,
     InternalBufferOverflow,
 
     Hw(St25r95Error),
 
+    InvalidDataLen(usize),
     InvalidModulationIndex(u8),
     InvalidReceiverGain(u8),
     InvalidDemodulatorSensitivity(u8),
@@ -41,8 +33,8 @@ pub enum Error<SPI, I, O> {
         actual: u8,
     },
     InvalidResponseLength {
-        expected: u16,
-        actual: ReadResponse,
+        expected: usize,
+        actual: usize,
     },
     InvalidWakeUpSource(u8),
     CalibrationNeeded,
@@ -58,6 +50,12 @@ pub enum Error<SPI, I, O> {
     InvalidCascadeLevelFilterCount(usize),
 
     EchoFailed,
+}
+
+impl From<heapless::CapacityError> for Error {
+    fn from(_: heapless::CapacityError) -> Self {
+        Self::Vec
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -116,5 +114,12 @@ impl From<u8> for St25r95Error {
     }
 }
 
-pub type Result<T, SPI: SpiDevice, I: InputPin, O: OutputPin> =
-    core::result::Result<T, Error<SPI::Error, I::Error, O::Error>>;
+pub type Result<T> = core::result::Result<T, Error>;
+
+impl core::error::Error for Error {}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error> {
+        write!(f, "{self:?}")
+    }
+}

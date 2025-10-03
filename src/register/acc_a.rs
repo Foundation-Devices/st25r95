@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use {super::Register, crate::Error, core::fmt::Debug};
+use {
+    super::Register,
+    crate::{Error, Result},
+    core::fmt::Debug,
+};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct LoadModulationIndex(u8);
@@ -25,7 +29,7 @@ impl Default for LoadModulationIndex {
 impl TryFrom<u8> for LoadModulationIndex {
     type Error = ();
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
         if !(0x1..=0xf).contains(&value) {
             return Err(());
         }
@@ -42,7 +46,7 @@ pub enum DemodulatorSensitivity {
 impl TryFrom<u8> for DemodulatorSensitivity {
     type Error = ();
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
         match value {
             0x1 => Ok(Self::Percent10),
             0x2 => Ok(Self::Percent100),
@@ -76,7 +80,7 @@ impl Register for AccA {
 }
 
 impl AccA {
-    pub(crate) fn from_u8<SPI, I, O>(data: u8) -> Result<Self, Error<SPI, I, O>> {
+    pub(crate) fn from_u8(data: u8) -> Result<Self> {
         let load_modulation_index = data & 0xf;
         let load_modulation_index =
             load_modulation_index
@@ -106,41 +110,31 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, PartialEq)]
-    struct SPI;
-    #[derive(Debug, PartialEq)]
-    struct I;
-    #[derive(Debug, PartialEq)]
-    struct O;
-
     #[test]
     pub fn test_acc_a_from_u8() {
         assert_eq!(
-            AccA::from_u8::<SPI, I, O>(0x17),
+            AccA::from_u8(0x17),
             Ok(AccA {
                 load_modulation_index: LoadModulationIndex::default(),
                 demodulator_sensitivity: DemodulatorSensitivity::Percent10
             })
         );
         assert_eq!(
-            AccA::from_u8::<SPI, I, O>(0x07),
+            AccA::from_u8(0x07),
             Err(Error::InvalidDemodulatorSensitivity(0x0))
         );
         assert_eq!(
-            AccA::from_u8::<SPI, I, O>(0x37),
+            AccA::from_u8(0x37),
             Err(Error::InvalidDemodulatorSensitivity(0x3))
         );
         assert_eq!(
-            AccA::from_u8::<SPI, I, O>(0x20),
+            AccA::from_u8(0x20),
             Err(Error::InvalidLoadModulationIndex {
                 load_modulation_index: 0x0,
                 min: 0x1,
                 max: 0xf,
             })
         );
-        assert_eq!(
-            AccA::from_u8::<SPI, I, O>(0xE7),
-            Err(Error::InvalidRFU(0x3))
-        );
+        assert_eq!(AccA::from_u8(0xE7), Err(Error::InvalidRFU(0x3)));
     }
 }

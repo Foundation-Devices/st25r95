@@ -1,17 +1,17 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use embedded_hal::spi::SpiDevice;
+use crate::{Command, PollFlags, ReadResponse, Result};
 
 pub trait St25r95Spi {
-    fn poll(&mut self, flags: PollFlags) -> Result<(), SPI, I, O>;
-    fn reset(&mut self) -> Result<(), SPI, I, O>;
-    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<(), SPI, I, O>;
-    fn read(&mut self) -> Result<ReadResponse, SPI, I, O>;
+    fn poll(&mut self, flags: PollFlags) -> Result<()>;
+    fn reset(&mut self) -> Result<()>;
+    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<()>;
+    fn read(&mut self) -> Result<ReadResponse>;
+    fn read_echo(&mut self) -> Result<()>;
 }
 
-pub const SPI_MAX_XFER_LEN: usize = 300;
-
+/*
 pub struct SpiAdapter {
     spi: SpiDevice,
     buf: [u8; SPI_MAX_XFER_LEN],
@@ -27,7 +27,7 @@ impl SpiAdapter {
 }
 
 impl St25r95Spi for SpiAdapter {
-    fn poll(&mut self, flags: PollFlags) -> Result<(), SPI, I, O> {
+    fn poll(&mut self, flags: PollFlags) -> Result<()> {
         let mut curr_flags = [0; 2];
         self.spi
             .transfer(&mut curr_flags, &[Control::Poll as u8, Control::Poll as u8])
@@ -38,17 +38,18 @@ impl St25r95Spi for SpiAdapter {
         }
     }
 
-    fn reset(&mut self) -> Result<(), SPI, I, O> {
+    fn reset(&mut self) -> Result<()> {
         self.spi.write(&[Control::Reset as u8]).map_err(Error::Spi)
     }
 
-    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<(), SPI, I, O> {
+    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<()> {
         if data.len() > self.buf.len() - 3 {
             return Err(Error::InternalBufferOverflow);
         }
 
         self.buf[0] = Control::Send as u8;
         self.buf[1] = cmd as u8;
+        // TODO: special case of Echo, do not sent the len
         self.buf[2] = data.len() as u8;
         self.buf[3..3 + data.len()].copy_from_slice(data);
 
@@ -57,7 +58,7 @@ impl St25r95Spi for SpiAdapter {
             .map_err(Error::Spi)
     }
 
-    fn read(&mut self) -> Result<ReadResponse, SPI, I, O> {
+    fn read(&mut self) -> Result<ReadResponse> {
         self.buf[0] = Control::Read as u8;
         self.spi
             .transfer_in_place(&mut self.buf[..2])
@@ -86,4 +87,33 @@ impl St25r95Spi for SpiAdapter {
             Err(Error::Hw(response.code.into()))
         }
     }
+
+    fn read_echo(&mut self) -> Result<()>  {
+        self.buf[0] = Control::Read as u8;
+        self.buf[1] = 0;
+        self.buf[2] = 0;
+        self.buf[3] = 0;
+        self.spi
+            .transfer_in_place(&mut self.buf[..if self.role.0 { 4 } else { 2 }])
+            .map_err(Error::Spi)?;
+        if self.buf[0] != Command::Echo as u8 {
+            //TODO: flush Chip SPI buffer
+            return Err(Error::EchoFailed);
+        }
+        if self.role.0 {
+            let response = ReadResponse::new(&self.buf[1..3]);
+            if response.code != 0x85 {
+                return Err(Error::EchoFailed);
+            }
+            if response.len != 0 {
+                return Err(Error::InvalidResponseLength {
+                    expected: 0,
+                    actual: response,
+                });
+            }
+            self.role.0 = false; // Listening mode was cancelled by the application
+        }
+        Ok(())
+    }
 }
+*/

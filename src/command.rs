@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #[derive(Debug, Copy, Clone)]
-pub(crate) enum Command {
+pub enum Command {
     Idn = 0x01,
     ProtocolSelect = 0x02,
     PollField = 0x03,
