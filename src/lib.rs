@@ -10,8 +10,17 @@ mod protocol;
 mod register;
 mod spi;
 
+pub use {
+    crate::{
+        command::{Command, IdleParams},
+        control::{Control, PollFlags},
+        protocol::*,
+        register::*,
+    },
+    error::{Error, Result, St25r95Error},
+    spi::St25r95Spi,
+};
 use {
-    crate::command::Command,
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
     arc_b::{ArcB, ModulationIndex, ReceiverGain},
     auto_detect_filter::AutoDetectFilter,
@@ -30,16 +39,6 @@ use {
     iso15693::reader::Modulation,
     timer_window::TimerWindow,
     wakeup::Wakeup,
-};
-pub use {
-    crate::{
-        command::IdleParams,
-        control::{Control, PollFlags},
-        protocol::*,
-        register::*,
-    },
-    error::{Error, Result},
-    spi::St25r95Spi,
 };
 
 // Type State Field
@@ -138,6 +137,15 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Defa
             role: R::default(),
             protocol: P::default(),
         })
+    }
+
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    pub fn echo(&mut self) -> Result<()> {
+        self.spi.poll(PollFlags::CAN_SEND)?;
+        self.spi.send_command(Command::Echo, &[])?;
+        self.poll_irq_out(100)?;
+        self.spi.read_echo()
     }
 }
 
@@ -462,15 +470,6 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
             .try_into()
             .map_err(|_| Error::InvalidWakeUpSource(value))
     }
-
-    /// The Echo command verifies the possibility of communication between a Host and the
-    /// ST25R95.
-    pub fn echo(&mut self) -> Result<()> {
-        self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[])?;
-        self.poll_irq_out(100)?;
-        self.spi.read_echo()
-    }
 }
 
 impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
@@ -554,6 +553,15 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
 
     pub fn write_arc_b(&mut self, arc_b: ArcB) -> Result<()> {
         self._write_register(&arc_b, false, Some(arc_b.value()))
+    }
+
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    pub fn echo(&mut self) -> Result<()> {
+        self.spi.poll(PollFlags::CAN_SEND)?;
+        self.spi.send_command(Command::Echo, &[])?;
+        self.poll_irq_out(100)?;
+        self.spi.read_echo()
     }
 }
 
@@ -871,6 +879,22 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
         let response = self.read()?;
         response.expect_data_len(0)
     }
+
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    pub fn echo(&mut self) -> Result<()> {
+        self.spi.poll(PollFlags::CAN_SEND)?;
+        self.spi.send_command(Command::Echo, &[])?;
+        self.poll_irq_out(100)?;
+        match self.spi.read_echo() {
+            Err(Error::Hw(St25r95Error::UserStop)) if self.role.0 => {
+                /* Listening mode was cancelled by the application */
+                self.role.0 = false;
+                Ok(())
+            }
+            r => r,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -880,7 +904,7 @@ pub struct ReadResponse {
 }
 
 impl ReadResponse {
-    fn data_len(value: [u8; 2]) -> usize {
+    pub fn data_len(value: [u8; 2]) -> usize {
         // See datasheet section 4.3 (Support of long frames)
         value[1] as usize
             | if value[0] & 0x80 == 0x80 {
@@ -890,7 +914,7 @@ impl ReadResponse {
             }
     }
 
-    fn expect_data_len(&self, expected: usize) -> Result<()> {
+    pub fn expect_data_len(&self, expected: usize) -> Result<()> {
         if self.data.len() != expected {
             Err(Error::InvalidResponseLength {
                 expected,

@@ -15,6 +15,7 @@ pub enum Error {
     IdentificationError,
     InternalBufferOverflow,
 
+    #[from]
     Hw(St25r95Error),
 
     InvalidDataLen(usize),
