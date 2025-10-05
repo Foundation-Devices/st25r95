@@ -17,6 +17,28 @@ pub enum Command {
     Echo = 0x55,
 }
 
+impl TryFrom<u8> for Command {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x01 => Ok(Self::Idn),
+            0x02 => Ok(Self::ProtocolSelect),
+            0x03 => Ok(Self::PollField),
+            0x04 => Ok(Self::SendRecv),
+            0x05 => Ok(Self::Listen),
+            0x06 => Ok(Self::Send),
+            0x07 => Ok(Self::Idle),
+            0x08 => Ok(Self::RdReg),
+            0x09 => Ok(Self::WrReg),
+            // 0x0B => Ok(Self::SubFreqRes),
+            0x0D => Ok(Self::ACFilter),
+            0x55 => Ok(Self::Echo),
+            c => Err(c),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub struct WaitForField {
     pub apparance: bool,
