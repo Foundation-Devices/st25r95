@@ -193,7 +193,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
 
     fn read(&mut self) -> Result<ReadResponse> {
         self.poll_irq_out(100)?;
-        self.spi.read()
+        self.spi.read_data()
     }
 
     /// The IDN command gives brief information about the ST25R95 and its revision.
@@ -904,6 +904,10 @@ pub struct ReadResponse {
 }
 
 impl ReadResponse {
+    pub fn code(value: u8) -> u8 {
+        value & 0b1001_1111
+    }
+
     pub fn data_len(value: [u8; 2]) -> usize {
         // See datasheet section 4.3 (Support of long frames)
         value[1] as usize
@@ -934,13 +938,13 @@ impl TryFrom<&[u8]> for ReadResponse {
         }
         // See datasheet section 4.3 (Support of long frames)
         let data_len = Self::data_len(value[..2].try_into().unwrap());
-        if data_len != value.len() + 2 {
+        if data_len != value.len() - 2 {
             return Err(Error::InvalidDataLen(value.len()));
         }
         let mut data = heapless::Vec::new();
         data.extend_from_slice(&value[2..data_len + 2])?;
         Ok(Self {
-            code: value[0],
+            code: ReadResponse::code(value[0]),
             data,
         })
     }
@@ -959,6 +963,7 @@ mod tests {
         check_range(0x90, 0x00..0xff, 0..255);
         check_range(0xB0, 0x00..0xff, 256..511);
         check_range(0xD0, 0x00..0x10, 512..528);
+        assert_eq!(ReadResponse::data_len([0, 0]), 0);
     }
 
     fn check_range(code: u8, len_range: Range<u8>, res_range: Range<usize>) {
@@ -966,5 +971,16 @@ mod tests {
             let res = ReadResponse::data_len([code, len]);
             assert!(res_range.contains(&res))
         }
+    }
+
+    #[test]
+    pub fn test_from_slice() {
+        assert_eq!(
+            ReadResponse::try_from([0, 0].as_slice()),
+            Ok(ReadResponse {
+                code: 0,
+                data: heapless::Vec::<u8, MAX_BUFFER_SIZE>::new()
+            })
+        );
     }
 }

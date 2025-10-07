@@ -115,6 +115,35 @@ impl From<u8> for St25r95Error {
     }
 }
 
+impl From<St25r95Error> for u8 {
+    fn from(value: St25r95Error) -> Self {
+        match value {
+            St25r95Error::EmdSOFerror23 => 0x63,
+            St25r95Error::EmdSOFerror10 => 0x65,
+            St25r95Error::EmdEgt => 0x66,
+            St25r95Error::TrlTooBig => 0x67,
+            St25r95Error::TrlTooSmall => 0x68,
+            St25r95Error::Internal => 0x71,
+            St25r95Error::FrameRecvOK => 0x80,
+            St25r95Error::InvalidCommandLength => 0x82,
+            St25r95Error::InvalidProtocol => 0x83,
+            St25r95Error::UserStop => 0x85,
+            St25r95Error::CommunicationError => 0x86,
+            St25r95Error::FrameTimeoutOrNoTag => 0x87,
+            St25r95Error::InvalidSof => 0x88,
+            St25r95Error::RxBufferOverflow => 0x89,
+            St25r95Error::FramingError => 0x8A,
+            St25r95Error::EgtTimeout => 0x8B,
+            St25r95Error::InvalidLength => 0x8C,
+            St25r95Error::CrcError => 0x8D,
+            St25r95Error::ReceptionLostWithoutEof => 0x8E,
+            St25r95Error::NoField => 0x8F,
+            St25r95Error::UintByte => 0x90,
+            St25r95Error::UnknownError(e) => e,
+        }
+    }
+}
+
 pub type Result<T> = core::result::Result<T, Error>;
 
 impl core::error::Error for Error {}
