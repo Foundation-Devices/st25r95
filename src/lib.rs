@@ -143,7 +143,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Defa
     /// ST25R95.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[])?;
+        self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
         self.spi.read_echo()
     }
@@ -198,7 +198,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
 
     /// The IDN command gives brief information about the ST25R95 and its revision.
     pub fn idn(&mut self) -> Result<(heapless::String<13>, u16)> {
-        self.spi.send_command(Command::Idn, &[])?;
+        self.spi.send_command(Command::Idn, &[], false)?;
 
         let response = self.read()?;
         response.expect_data_len(15)?;
@@ -219,7 +219,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         }
 
         self.spi
-            .send_command(Command::ProtocolSelect, &data[..1 + data_len])?;
+            .send_command(Command::ProtocolSelect, &data[..1 + data_len], false)?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -335,14 +335,16 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     /// turned ON by the reader.
     pub fn poll_field(&mut self, wff: Option<WaitForField>) -> Result<bool> {
         match wff {
-            None => self.spi.send_command(Command::PollField, &[])?,
+            None => self.spi.send_command(Command::PollField, &[], false)?,
             Some(WaitForField {
                 apparance,
                 presc,
                 timer,
-            }) => self
-                .spi
-                .send_command(Command::PollField, &[apparance as u8, presc, timer])?,
+            }) => self.spi.send_command(
+                Command::PollField,
+                &[apparance as u8, presc, timer],
+                false,
+            )?,
         }
 
         let response = self.read()?;
@@ -378,7 +380,8 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
                 }
             }
         }
-        self.spi.send_command(Command::Idle, &params.data())?;
+        self.spi
+            .send_command(Command::Idle, &params.data(), false)?;
 
         let response = self.read()?;
         if response.data.len() != 1 {
@@ -427,7 +430,8 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         } else {
             3
         };
-        self.spi.send_command(Command::WrReg, &data[..data_len])?;
+        self.spi
+            .send_command(Command::WrReg, &data[..data_len], false)?;
 
         let response = self.read()?;
         if response.data.len() != 0 {
@@ -449,7 +453,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
         data[0] = reg.read_addr();
         data[1] = 0x01;
         data[2] = 0x00;
-        self.spi.send_command(Command::RdReg, &data)?;
+        self.spi.send_command(Command::RdReg, &data, false)?;
 
         let response = self.read()?;
         if response.data.len() != 1 {
@@ -479,7 +483,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     /// If the tag response was received and decoded correctly, the <Data> field can
     /// contain additional information which is protocol-specific.
     pub fn send_receive(&mut self, data: &[u8]) -> Result<ReadResponse> {
-        self.spi.send_command(Command::SendRecv, data)?;
+        self.spi.send_command(Command::SendRecv, data, false)?;
         self.read()
     }
 
@@ -559,7 +563,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     /// ST25R95.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[])?;
+        self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
         self.spi.read_echo()
     }
@@ -748,7 +752,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     /// must be used to exit the Listening mode prior to sending a new command to the
     /// ST25R95.
     pub fn listen(&mut self) -> Result<()> {
-        self.spi.send_command(Command::Listen, &[])?;
+        self.spi.send_command(Command::Listen, &[], false)?;
 
         let response = self.read()?;
         response.expect_data_len(0)?;
@@ -771,7 +775,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
 
     /// Immediately sends data to the reader using the Load Modulation method.
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.spi.send_command(Command::Send, data)?;
+        self.spi.send_command(Command::Send, data, false)?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -846,14 +850,14 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
             return Err(Error::InvalidCascadeLevelFilterCount(clf_len));
         }
         self.spi
-            .send_command(Command::ACFilter, &data[..3 + clf_len])?;
+            .send_command(Command::ACFilter, &data[..3 + clf_len], false)?;
 
         let response = self.read()?;
         response.expect_data_len(0)
     }
 
     fn ac_filter_state(&mut self, data: &[u8]) -> Result<AntiColState> {
-        self.spi.send_command(Command::ACFilter, data)?;
+        self.spi.send_command(Command::ACFilter, data, false)?;
 
         let response = self.read()?;
         response.expect_data_len(1)?;
@@ -874,7 +878,8 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
 
     /// This command sets the Anti-Collision Filter state in Type A card emulation mode.
     pub fn set_anti_collision_state(&mut self, state: AntiColState) -> Result<()> {
-        self.spi.send_command(Command::ACFilter, &[state as u8])?;
+        self.spi
+            .send_command(Command::ACFilter, &[state as u8], false)?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -884,7 +889,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     /// ST25R95.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[])?;
+        self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
         match self.spi.read_echo() {
             Err(Error::Hw(St25r95Error::UserStop)) if self.role.0 => {

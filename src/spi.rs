@@ -6,8 +6,8 @@ use crate::{Command, PollFlags, ReadResponse, Result};
 pub trait St25r95Spi {
     fn poll(&mut self, flags: PollFlags) -> Result<()>;
     fn reset(&mut self) -> Result<()>;
-    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<()>;
+    fn send_command(&mut self, cmd: Command, data: &[u8], sod: bool) -> Result<()>;
     fn read_data(&mut self) -> Result<ReadResponse>;
     fn read_echo(&mut self) -> Result<()>;
-    fn flush(&mut self, skip_cs: bool) -> Result<()>;
+    fn flush(&mut self) -> Result<()>;
 }
