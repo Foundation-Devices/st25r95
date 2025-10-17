@@ -916,7 +916,7 @@ impl ReadResponse {
     pub fn data_len(value: [u8; 2]) -> usize {
         // See datasheet section 4.3 (Support of long frames)
         value[1] as usize
-            | if value[0] & 0x80 == 0x80 {
+            | if value[0] & 0x8F == 0x80 {
                 (value[0] as usize & 0b0110_0000) << 3
             } else {
                 0
@@ -969,6 +969,8 @@ mod tests {
         check_range(0xB0, 0x00..0xff, 256..511);
         check_range(0xD0, 0x00..0x10, 512..528);
         assert_eq!(ReadResponse::data_len([0, 0]), 0);
+        assert_eq!(ReadResponse::data_len([0x90, 8]), 8);
+        assert_eq!(ReadResponse::data_len([0x87, 9]), 9);
     }
 
     fn check_range(code: u8, len_range: Range<u8>, res_range: Range<usize>) {
