@@ -6,8 +6,6 @@ use derive_more::From;
 #[derive(Copy, Clone, Debug, From, PartialEq)]
 pub enum Error {
     Spi,
-    IrqOut,
-    IrqIn,
     #[from]
     UTF8(core::str::Utf8Error),
     Vec,

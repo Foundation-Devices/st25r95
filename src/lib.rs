@@ -6,6 +6,7 @@
 mod command;
 mod control;
 mod error;
+mod gpio;
 mod protocol;
 mod register;
 mod spi;
@@ -18,6 +19,7 @@ pub use {
         register::*,
     },
     error::{Error, Result, St25r95Error},
+    gpio::St25r95Gpio,
     spi::St25r95Spi,
 };
 use {
@@ -26,10 +28,6 @@ use {
     auto_detect_filter::AutoDetectFilter,
     command::{CtrlResConf, DacData, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
-    embedded_hal::{
-        delay::DelayNs,
-        digital::{InputPin, OutputPin},
-    },
     iso14443a::{
         card_emulation::{AntiColState, Listen},
         ATQA,
@@ -67,25 +65,19 @@ pub struct FeliCa;
 #[derive(Debug)]
 pub struct NoProtocol;
 
-type ResultSt25r95FieldOff<SPI, D, I, O, R, P> = Result<St25r95<SPI, D, I, O, FieldOff, R, P>>;
-type ResultSt25r95ReaderIso15693<SPI, D, I, O> =
-    Result<St25r95<SPI, D, I, O, FieldOn, Reader, Iso15693>>;
-type ResultSt25r95ReaderIso14443A<SPI, D, I, O> =
-    Result<St25r95<SPI, D, I, O, FieldOn, Reader, Iso14443A>>;
-type ResultSt25r95ReaderIso14443B<SPI, D, I, O> =
-    Result<St25r95<SPI, D, I, O, FieldOn, Reader, Iso14443B>>;
-type ResultSt25r95ReaderFelica<SPI, D, I, O> =
-    Result<St25r95<SPI, D, I, O, FieldOn, Reader, FeliCa>>;
-type ResultSt25r95CardEmulationIso14443A<SPI, D, I, O> =
-    Result<St25r95<SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>>;
+type ResultSt25r95FieldOff<S, G, R, P> = Result<St25r95<S, G, FieldOff, R, P>>;
+type ResultSt25r95ReaderIso15693<S, G> = Result<St25r95<S, G, FieldOn, Reader, Iso15693>>;
+type ResultSt25r95ReaderIso14443A<S, G> = Result<St25r95<S, G, FieldOn, Reader, Iso14443A>>;
+type ResultSt25r95ReaderIso14443B<S, G> = Result<St25r95<S, G, FieldOn, Reader, Iso14443B>>;
+type ResultSt25r95ReaderFelica<S, G> = Result<St25r95<S, G, FieldOn, Reader, FeliCa>>;
+type ResultSt25r95CardEmulationIso14443A<S, G> =
+    Result<St25r95<S, G, FieldOn, CardEmulation, Iso14443A>>;
 
 pub const MAX_BUFFER_SIZE: usize = 530;
 
-pub struct St25r95<SPI, D, I, O, F, R, P> {
-    spi: SPI,
-    delay: D,
-    irq_out: I,
-    irq_in: O,
+pub struct St25r95<S, G, F, R, P> {
+    spi: S,
+    gpio: G,
     dac_ref: Option<u8>,
     dac_guard: u8,
     field: PhantomData<F>,
@@ -93,16 +85,12 @@ pub struct St25r95<SPI, D, I, O, F, R, P> {
     protocol: P,
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
-    St25r95<SPI, D, I, O, FieldOff, NoRole, NoProtocol>
-{
-    pub fn new(spi: SPI, delay: D, irq_out: I, irq_in: O) -> Result<Self> {
+impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> {
+    pub fn new(spi: S, gpio: G) -> Result<Self> {
         // do not assume any state
         let mut st25r95 = Self {
             spi,
-            delay,
-            irq_out,
-            irq_in,
+            gpio,
             dac_ref: None,
             dac_guard: 0,
             field: PhantomData,
@@ -110,7 +98,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
             protocol: NoProtocol,
         };
         // Startup sequence §3.2
-        st25r95.irq_in_pulse_low()?;
+        st25r95.gpio.irq_in_pulse_low();
         // should be in Ready state
         st25r95.reset()?;
         let (idn_str, _) = st25r95.idn()?;
@@ -121,16 +109,12 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Default>
-    St25r95<SPI, D, I, O, FieldOn, R, P>
-{
-    pub fn field_off(mut self) -> ResultSt25r95FieldOff<SPI, D, I, O, R, P> {
+impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldOn, R, P> {
+    pub fn field_off(mut self) -> ResultSt25r95FieldOff<S, G, R, P> {
         self.select_protocol(Protocol::FieldOff, protocol::FieldOff)?;
         Ok(St25r95 {
             spi: self.spi,
-            delay: self.delay,
-            irq_out: self.irq_out,
-            irq_in: self.irq_in,
+            gpio: self.gpio,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
             field: PhantomData::<FieldOff>,
@@ -149,46 +133,18 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, R: Default, P: Defa
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
-    St25r95<SPI, D, I, O, F, R, P>
-{
-    fn irq_in_pulse_low(&mut self) -> Result<()> {
-        self.irq_in.set_high().map_err(|_| Error::IrqIn)?;
-        self.delay.delay_ms(1); // t0 > 100us
-        self.irq_in.set_low().map_err(|_| Error::IrqIn)?;
-        self.delay.delay_ms(1); // t1 > 10us
-        self.irq_in.set_high().map_err(|_| Error::IrqIn)?;
-        self.delay.delay_ms(11); // t3 > 10ms
-
-        // should be in Ready state
-        Ok(())
-    }
-
+impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     fn reset(&mut self) -> Result<()> {
         self.spi.reset()?;
-        self.delay.delay_ms(3);
         // should be in Power-up state
-        self.irq_in_pulse_low()?;
+        self.gpio.irq_in_pulse_low();
         Ok(())
     }
 
-    fn poll_irq_out(&mut self, timeout: impl Into<Option<u32>> + Copy) -> Result<()> {
-        let mut curr_timeout = 0u32;
-        loop {
-            if self.irq_out.is_low().map_err(|_| Error::IrqOut)? {
-                return Ok(());
-            }
-
-            if let Some(timeout) = timeout.into() {
-                if curr_timeout > timeout {
-                    //TODO: flush Chip SPI buffer
-                    return Err(Error::PollTimeout);
-                }
-
-                curr_timeout += 1;
-            }
-            self.delay.delay_ms(1);
-        }
+    fn poll_irq_out(&mut self, timeout: u32) -> Result<()> {
+        self.gpio
+            .wait_irq_out_falling_edge(timeout)
+            .map_err(|_| Error::PollTimeout)
     }
 
     fn read(&mut self) -> Result<ReadResponse> {
@@ -230,14 +186,12 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_iso15693(
         mut self,
         params: iso15693::reader::Parameters,
-    ) -> ResultSt25r95ReaderIso15693<SPI, D, I, O> {
+    ) -> ResultSt25r95ReaderIso15693<S, G> {
         let modulation = params.get_modulation();
         self.select_protocol(Protocol::Iso15693, params)?;
         Ok(St25r95 {
             spi: self.spi,
-            delay: self.delay,
-            irq_out: self.irq_out,
-            irq_in: self.irq_in,
+            gpio: self.gpio,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
             field: PhantomData::<FieldOn>,
@@ -251,13 +205,11 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_iso14443a(
         mut self,
         params: iso14443a::reader::Parameters,
-    ) -> ResultSt25r95ReaderIso14443A<SPI, D, I, O> {
+    ) -> ResultSt25r95ReaderIso14443A<S, G> {
         self.select_protocol(Protocol::Iso14443A, params)?;
         Ok(St25r95 {
             spi: self.spi,
-            delay: self.delay,
-            irq_out: self.irq_out,
-            irq_in: self.irq_in,
+            gpio: self.gpio,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
             field: PhantomData::<FieldOn>,
@@ -271,13 +223,11 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_iso14443b(
         mut self,
         params: iso14443b::reader::Parameters,
-    ) -> ResultSt25r95ReaderIso14443B<SPI, D, I, O> {
+    ) -> ResultSt25r95ReaderIso14443B<S, G> {
         self.select_protocol(Protocol::Iso14443B, params)?;
         Ok(St25r95 {
             spi: self.spi,
-            delay: self.delay,
-            irq_out: self.irq_out,
-            irq_in: self.irq_in,
+            gpio: self.gpio,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
             field: PhantomData::<FieldOn>,
@@ -291,13 +241,11 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_felica(
         mut self,
         params: felica::reader::Parameters,
-    ) -> ResultSt25r95ReaderFelica<SPI, D, I, O> {
+    ) -> ResultSt25r95ReaderFelica<S, G> {
         self.select_protocol(Protocol::FeliCa, params)?;
         Ok(St25r95 {
             spi: self.spi,
-            delay: self.delay,
-            irq_out: self.irq_out,
-            irq_in: self.irq_in,
+            gpio: self.gpio,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
             field: PhantomData::<FieldOn>,
@@ -311,13 +259,11 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     pub fn protocol_select_ce_iso14443a(
         mut self,
         params: iso14443a::card_emulation::Parameters,
-    ) -> ResultSt25r95CardEmulationIso14443A<SPI, D, I, O> {
+    ) -> ResultSt25r95CardEmulationIso14443A<S, G> {
         self.select_protocol(Protocol::CardEmulationIso14443A, params)?;
         Ok(St25r95 {
             spi: self.spi,
-            delay: self.delay,
-            irq_out: self.irq_out,
-            irq_in: self.irq_in,
+            gpio: self.gpio,
             dac_ref: self.dac_ref,
             dac_guard: self.dac_guard,
             field: PhantomData::<FieldOn>,
@@ -476,9 +422,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, F, R, P>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
-    St25r95<SPI, D, I, O, FieldOn, Reader, P>
-{
+impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P> {
     /// This command sends data to a contactless tag and receives its reply.
     /// If the tag response was received and decoded correctly, the <Data> field can
     /// contain additional information which is protocol-specific.
@@ -569,9 +513,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin, P: Default>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
-    St25r95<SPI, D, I, O, FieldOn, Reader, Iso15693>
-{
+impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso15693> {
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
@@ -609,9 +551,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
-    St25r95<SPI, D, I, O, FieldOn, Reader, Iso14443A>
-{
+impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso14443A> {
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
@@ -666,9 +606,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
-    St25r95<SPI, D, I, O, FieldOn, Reader, Iso14443B>
-{
+impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso14443B> {
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
@@ -699,9 +637,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
-    St25r95<SPI, D, I, O, FieldOn, Reader, FeliCa>
-{
+impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, FeliCa> {
     pub fn new_arc_b(
         &self,
         modulation_index: ModulationIndex,
@@ -741,9 +677,7 @@ impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
     }
 }
 
-impl<SPI: St25r95Spi, D: DelayNs, I: InputPin, O: OutputPin>
-    St25r95<SPI, D, I, O, FieldOn, CardEmulation, Iso14443A>
-{
+impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso14443A> {
     /// In card emulation mode, this function puts the ST25R95 in Listening mode.
     /// The ST25R95 will exit Listening mode as soon it receives the Echo command from the
     /// Host Controller (MCU) or a command from an external reader (not including commands

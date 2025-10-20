@@ -11,5 +11,4 @@ rust = "1.86.0"
 [dependencies]
 bitflags = { version = "2.6" }
 derive_more = { version = "1.0", features = ["from"], default-features = false }
-embedded-hal = { version = "1.0" }
 heapless = { version = "0.9" }
