@@ -8,6 +8,5 @@ pub trait St25r95Spi {
     fn reset(&mut self) -> Result<()>;
     fn send_command(&mut self, cmd: Command, data: &[u8], sod: bool) -> Result<()>;
     fn read_data(&mut self) -> Result<ReadResponse>;
-    fn read_echo(&mut self) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
 }

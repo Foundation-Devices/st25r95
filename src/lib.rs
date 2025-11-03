@@ -129,7 +129,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldO
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
-        self.spi.read_echo()
+        self.spi.read_data().map(|_| ())
     }
 }
 
@@ -509,7 +509,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
-        self.spi.read_echo()
+        self.spi.read_data().map(|_| ())
     }
 }
 
@@ -825,7 +825,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
-        match self.spi.read_echo() {
+        match self.spi.read_data().map(|_| ()) {
             Err(Error::Hw(St25r95Error::UserStop)) if self.role.0 => {
                 /* Listening mode was cancelled by the application */
                 self.role.0 = false;
