@@ -30,9 +30,7 @@ use {
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     iso14443a::{
         card_emulation::{AntiColState, Listen},
-        ATQA,
-        SAK,
-        UID,
+        ATQA, SAK, UID,
     },
     iso15693::reader::Modulation,
     timer_window::TimerWindow,
@@ -106,6 +104,15 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
             return Err(Error::IdentificationError);
         }
         Ok(st25r95)
+    }
+
+    /// The Echo command verifies the possibility of communication between a Host and the
+    /// ST25R95.
+    pub fn echo(&mut self) -> Result<()> {
+        self.spi.poll(PollFlags::CAN_SEND)?;
+        self.spi.send_command(Command::Echo, &[], false)?;
+        self.poll_irq_out(100)?;
+        self.spi.read_data().map(|_| ())
     }
 }
 
