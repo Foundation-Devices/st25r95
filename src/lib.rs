@@ -13,7 +13,7 @@ mod spi;
 
 pub use {
     crate::{
-        command::{Command, IdleParams},
+        command::{Command, CtrlResConf, IdleParams},
         control::{Control, PollFlags},
         protocol::*,
         register::*,
@@ -26,7 +26,7 @@ use {
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
     arc_b::{ArcB, ModulationIndex, ReceiverGain},
     auto_detect_filter::AutoDetectFilter,
-    command::{CtrlResConf, DacData, LFOFreq, WaitForField, WakeUpSource},
+    command::{DacData, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     iso14443a::{
         card_emulation::{AntiColState, Listen},
@@ -427,19 +427,9 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             .try_into()
             .map_err(|_| Error::InvalidWakeUpSource(value))
     }
-}
-
-impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P> {
-    /// This command sends data to a contactless tag and receives its reply.
-    /// If the tag response was received and decoded correctly, the <Data> field can
-    /// contain additional information which is protocol-specific.
-    pub fn send_receive(&mut self, data: &[u8]) -> Result<ReadResponse> {
-        self.spi.send_command(Command::SendRecv, data, false)?;
-        self.read()
-    }
 
     /// Calibrate the tag detector as wake-up source by an iterrative process.
-    pub fn calibrate_tag_detector(&mut self) -> Result<()> {
+    pub fn calibrate_tag_detector(&mut self) -> Result<u8> {
         let mut params = IdleParams {
             wus: WakeUpSource {
                 lfo_freq: LFOFreq::KHz32,
@@ -498,7 +488,17 @@ impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P
             params.dac_data.high -= 0x04;
         }
         self.dac_ref = Some(params.dac_data.high);
-        Ok(())
+        Ok(params.dac_data.high)
+    }
+}
+
+impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P> {
+    /// This command sends data to a contactless tag and receives its reply.
+    /// If the tag response was received and decoded correctly, the <Data> field can
+    /// contain additional information which is protocol-specific.
+    pub fn send_receive(&mut self, data: &[u8]) -> Result<ReadResponse> {
+        self.spi.send_command(Command::SendRecv, data, false)?;
+        self.read()
     }
 
     /// This command is used to read the ARC_B register.
