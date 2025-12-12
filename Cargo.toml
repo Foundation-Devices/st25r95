@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 [package]
-name = "st25r95"
-version = "0.1.0"
-edition = "2021"
+categories = ["embedded", "no-std"]
 description = "Driver for ST25R95 integrated transceiver for contactless applications (NFC)"
-rust = "1.86.0"
+edition = "2021"
+keywords = ["no-std", "nfc"]
+license = "GPL-3.0-or-later"
+name = "st25r95"
+repository = "https://github.com/Foundation-Devices/st25r95"
+rust-version = "1.86.0"
+version = "0.1.0"
 
 [dependencies]
 bitflags = { version = "2.6" }
