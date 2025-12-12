@@ -1,6 +1,87 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! FeliCa Protocol Support
+//!
+//! This module provides support for the FeliCa contactless smart card protocol,
+//! developed by Sony and widely used in Japan and other Asian markets. FeliCa
+//! is known for its speed and reliability, powering:
+//!
+//! - **Transit systems**: Suica, Pasmo, ICOCA railway cards
+//! - **Electronic money**: Edy, nanaco, Waon payment systems
+//! - **Access control**: Office and building entry systems
+//! - **Student ID cards**: University and school identification
+//! - **Loyalty programs**: Retail point-of-sale systems
+//! - **Mobile payments**: Osaifu-Keitai wallet integration
+//!
+//! ## Protocol Characteristics
+//!
+//! - **Communication Range**: Up to 10 cm (typically 1-5 cm)
+//! - **Data Rates**: 212 kbps, 424 kbps (high-speed)
+//! - **Anticollision**: Time division multiple access (TDMA)
+//! - **Security**: DES/3DES/AES encryption with mutual authentication
+//! - **Power**: Passive cards with optional active modes
+//! - **Transaction speed**: Extremely fast (~0.15 seconds)
+//!
+//! ## Key Features
+//!
+//! FeliCa offers several unique advantages:
+//! - **High-speed communication** enables quick transactions
+//! - **Reliable anticollision** with minimal delay
+//! - **Strong security** with robust encryption
+//! - **Flexible memory structure** with multiple services
+//! - **Dual-directional communication** for complex transactions
+//!
+//! ## Memory Organization
+//!
+//! FeliCa cards organize data into:
+//! - **System codes**: 16-bit identifiers for applications
+//! - **Services**: Grouped memory blocks with access controls
+//! - **Blocks**: 16-byte memory units for data storage
+//! - **IDm**: Manufacturer-assigned unique identifier
+//! - **PMm**: Parameter memory for card-specific data
+//!
+//! ## Reader Mode Features
+//!
+//! The reader mode implementation provides:
+//! - **Configurable data rates** (212/424 kbps) for optimal performance
+//! - **Fine-tuned FWT (Frame Waiting Time)** for timing optimization
+//! - **CRC validation** and error detection
+//! - **Polling frame configuration** for card detection
+//!
+//! ## Security Model
+//!
+//! FeliCa implements multi-layered security:
+//! - **ID authentication** verifies card identity
+//! - ** mutual authentication** with challenge-response
+//! - **Encryption** for sensitive data protection
+//! - **Access controls** for memory permissions
+//!
+//! ## Typical Applications
+//!
+//! FeliCa excels in:
+//! - **High-throughput environments** like transit gates
+//! - **Quick transactions** requiring minimal delay
+//! - **Secure payment systems** with encryption
+//! - **Multi-application cards** with diverse services
+//!
+//! ## Usage Examples
+//!
+//! ```rust,ignore
+//! // Reader mode with default settings
+//! let mut reader = nfc.protocol_select_felica(Default::default())?;
+//!
+//! // Polling command to detect FeliCa cards
+//! let polling = [0x00, 0xFF, 0xFF, 0x01, 0x00]; // System code: FFFE (wildcard)
+//! let response = reader.send_receive(&polling)?;
+//!
+//! // Configure for high-speed transactions
+//! let params = felica::reader::Parameters::new()
+//!     .tx_data_rate(felica::reader::DataRate::Kbps424)
+//!     .rx_data_rate(felica::reader::DataRate::Kbps424)
+//!     .with_crc(false); // FeliCa handles its own CRC
+//! ```
+
 pub mod reader {
     use super::super::ProtocolParams;
 

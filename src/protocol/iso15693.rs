@@ -1,6 +1,76 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! ISO/IEC 15693 Vicinity Coupling Protocol Support
+//!
+//! This module provides support for the ISO/IEC 15693 protocol, designed for
+//! vicinity (long-range) RFID applications. It's commonly known as "Vicinity
+//! Cards" or "V-Cards" and is ideal for:
+//!
+//! - **Inventory management**: Item tracking in warehouses and retail
+//! - **Library systems**: Book checkout and inventory tracking
+//! - **Access control**: Long-range building entry systems
+//! - **Asset tracking**: Equipment and tool management
+//! - **Electronic toll collection**: Vehicle identification at speed
+//! - **Supply chain logistics**: Pallet and container tracking
+//!
+//! ## Protocol Characteristics
+//!
+//! - **Communication Range**: Up to 1.5 meters (typically 50-70 cm)
+//! - **Data Rates**: 26 kbps (high), 6.6 kbps (low)
+//! - **Anticollision**: Efficient 16-slot anticollision algorithm
+//! - **Security**: Optional password protection and data locking
+//! - **Power**: Passive tags with long-range capability
+//! - **Memory**: Up to 8KB user memory in some implementations
+//!
+//! ## Key Features
+//!
+//! ISO15693 offers unique advantages:
+//! - **Long read range** compared to ISO14443 protocols
+//! - **Fast inventory** of multiple tags simultaneously
+//! - **High memory capacity** for data storage
+//! - **Robust anticollision** for dense tag environments
+//! - **Optional security features** for protected applications
+//!
+//! ## Reader Mode Features
+//!
+//! The reader mode implementation provides:
+//! - **Configurable data rates** (106/212/424 kbps) for optimal performance
+//! - **Adjustable RWT (Response Waiting Time)** for timing optimization
+//! - **CRC validation** for data integrity
+//! - **Collision detection** and handling
+//!
+//! ## Memory Organization
+//!
+//! ISO15693 tags typically organize memory in:
+//! - **Blocks**: 8-byte configurable memory blocks
+//! - **System area**: UID, configuration, and lock bytes
+//! - **User memory**: Application data storage
+//! - **Lock features**: Permanent and write-protect options
+//!
+//! ## Typical Applications
+//!
+//! ISO15693 is ideal for:
+//! - **Bulk inventory** where many tags need quick reading
+//! - **Long-range access** where proximity isn't feasible
+//! - **High-capacity storage** requirements
+//! - **Rugged environments** with reliable communication needed
+//!
+//! ## Usage Examples
+//!
+//! ```rust,ignore
+//! // Reader mode with default settings
+//! let mut reader = nfc.protocol_select_iso15693(Default::default())?;
+//!
+//! // Inventory command to detect all ISO15693 tags
+//! let response = reader.send_receive(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+//!
+//! // Configure for high-speed inventory
+//! let params = iso15693::reader::Parameters::new()
+//!     .tx_data_rate(iso15693::reader::DataRate::Kbps424)
+//!     .rx_data_rate(iso15693::reader::DataRate::Kbps424);
+//! ```
+
 pub mod reader {
     use super::super::ProtocolParams;
 

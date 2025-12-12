@@ -75,11 +75,8 @@ The driver uses Rust's type system to ensure correct usage:
 // Driver starts in FieldOff state
 let mut nfc = St25r95::new(spi, gpio)?;
 
-// After init(), driver is ready for operations
-let ready_nfc = nfc.init()?;
-
 // Protocol-specific operations are available
-let iso14443a = ready_nfc.protocol_iso14443a();
+let iso14443a = nfc.protocol_select_iso14443a(params)?;
 ```
 
 ## Error Handling

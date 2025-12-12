@@ -1,6 +1,57 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! ISO/IEC 14443 Type A Protocol Support
+//!
+//! This module provides support for the ISO/IEC 14443 Type A protocol, one of the most
+//! widely used NFC protocols. Type A is the foundation for:
+//!
+//! - **MIFARE Classic**: Contactless smart cards used for transit, access control
+//! - **MIFARE Ultralight/Light**: Low-cost tags for retail and logistics  
+//! - **NTAG series**: NFC Forum Type 2 tags for NFC applications
+//! - **Payment cards**: EMV contactless payment cards
+//! - **NFC Forum Type 4**: Advanced NFC applications with NDEF support
+//!
+//! ## Protocol Characteristics
+//!
+//! - **Communication Range**: Up to 10 cm (typically 2-5 cm)
+//! - **Data Rates**: 106 kbps, 212 kbps, 424 kbps
+//! - **Anticollision**: Uses bit-frame anticollision for UID selection
+//! - **Security**: MIFARE Classic supports proprietary authentication
+//! - **Power**: Passive tags powered by RF field
+//!
+//! ## Reader Mode Features
+//!
+//! The reader mode implementation provides:
+//! - **Configurable data rates** for optimal performance
+//! - **Fine-tuned FDT (Frame Delay Time)** for timing optimization
+//! - **ARC_B register configuration** for modulation and gain control
+//! - **Timer window adjustment** for improved demodulation
+//!
+//! ## Card Emulation Features
+//!
+//! The card emulation mode supports:
+//! - **Anti-collision filter** for selective emulation
+//! - **Configurable ACC_A register** for load modulation
+//! - **UID and cascade level management**
+//! - **ATQA and SAK configuration**
+//!
+//! ## Usage Examples
+//!
+//! ```rust,ignore
+//! // Reader mode with default settings
+//! let mut reader = nfc.protocol_select_iso14443a(Default::default())?;
+//!
+//! // Send REQA command to detect Type A cards
+//! let response = reader.send_receive(&[0x26])?;
+//!
+//! // Configure optimized parameters for high-speed communication
+//! let params = iso14443a::reader::Parameters::new()
+//!     .tx_data_rate(iso14443a::reader::DataRate::Kbps424)
+//!     .rx_data_rate(iso14443a::reader::DataRate::Kbps424);
+//! let mut reader = nfc.protocol_select_iso14443a(params)?;
+//! ```
+
 pub mod reader {
     use super::super::ProtocolParams;
 
@@ -241,7 +292,7 @@ pub struct TransmissionFlags {
     /// if set then the parity bit must be coded inside the data for each byte to be sent
     /// using the send/receive command in transmit mode, and is not decoded by the
     /// ST25R95 in receive mode. In Receive mode, each data byte is accompanied by an
-    /// additional byte which encodes the parity: <data byte> <parity byte> <data byte>.
+    /// additional byte which encodes the parity: `<data byte>` `<parity byte>` `<data byte>`.
     /// The parity framing mode is compatible with MIFARE® classic requirements. However,
     /// access to authenticated state must be supported by the external secure host which
     /// embeds the MIFARE® classic library.

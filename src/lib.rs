@@ -3,6 +3,81 @@
 
 #![cfg_attr(not(test), no_std)]
 
+//! # ST25R95 NFC Transceiver Driver
+//!
+//! This crate provides a high-level, type-safe driver for the ST25R95 NFC transceiver chip
+//! from STMicroelectronics. The ST25R95 is a multi-protocol NFC transceiver supporting
+//! reader and card emulation modes for various NFC protocols.
+//!
+//! ## Features
+//!
+//! - **Multi-protocol support**: ISO/IEC 14443A/B, ISO/IEC 15693, and FeliCa protocols
+//! - **Reader and Card Emulation modes**: Operate as either an NFC reader or emulate a card
+//! - **Type-state pattern**: Compile-time guarantees for correct usage sequences
+//! - **Hardware abstraction**: Trait-based SPI and GPIO interfaces for flexibility
+//! - **Embedded-friendly**: `no_std` compatible with minimal dependencies
+//! - **Register-level control**: Fine-tuned configuration of all ST25R95 parameters
+//!
+//! ## Type State Pattern
+//!
+//! This driver uses a sophisticated type-state pattern to prevent incorrect usage at compile time.
+//! The main `St25r95` struct is parameterized by five type state markers:
+//!
+//! - **Field State** (`F`): `FieldOn` or `FieldOff` - controls whether the RF field is active
+//! - **Role State** (`R`): `Reader`, `CardEmulation`, or `NoRole` - defines the operating mode
+//! - **Protocol State** (`P`): `Iso15693`, `Iso14443A`, `Iso14443B`, `FeliCa`, or `NoProtocol`
+//! - **SPI Interface** (`S`): User-provided implementation of `St25r95Spi`
+//! - **GPIO Interface** (`G`): User-provided implementation of `St25r95Gpio`
+//!
+//! This ensures that operations are only available when the chip is in the correct state.
+//! For example, you can only send/receive data when the field is on and a protocol is selected.
+//!
+//! ## Basic Usage
+//!
+//! ```rust,ignore
+//! use st25r95::{St25r95, St25r95Spi, St25r95Gpio};
+//!
+//! // Initialize the driver
+//! let mut nfc = St25r95::new(spi_interface, gpio_interface)?;
+//!
+//! // Select ISO14443A reader mode
+//! let mut nfc = nfc.protocol_select_iso14443a(Default::default())?;
+//!
+//! // Send a command to a tag and receive the response
+//! let response = nfc.send_receive(&[0x26])?; // REQA command
+//!
+//! // Turn off the RF field
+//! let nfc = nfc.field_off()?;
+//! ```
+//!
+//! ## Hardware Requirements
+//!
+//! - ST25R95 NFC transceiver chip
+//! - SPI interface for communication (MOSI, MISO, SCLK, CS)
+//! - GPIO pin for interrupt handling (IRQ_OUT)
+//! - Optional: GPIO pin for wake-up control (IRQ_IN)
+//!
+//! ## Protocol Support
+//!
+//! ### Reader Mode
+//! - **ISO/IEC 14443A**: MIFARE Classic, MIFARE Ultralight, NTAG, etc.
+//! - **ISO/IEC 14443B**: Calypso, etc.
+//! - **ISO/IEC 15693**: Vicinity cards, ICODE SLI, Tag-it HF-I, etc.
+//! - **FeliCa**: FeliCa cards and tags
+//!
+//! ### Card Emulation Mode
+//! - **ISO/IEC 14443A**: Emulate Type A cards with anti-collision support
+//!
+//! ## Error Handling
+//!
+//! The driver provides comprehensive error handling with specific error types for:
+//! - Hardware communication failures
+//! - Invalid parameter ranges
+//! - Protocol-specific errors
+//! - Timeout conditions
+//!
+//! See the `Error` enum for detailed information about possible error conditions.
+
 mod command;
 mod control;
 mod error;
@@ -37,29 +112,139 @@ use {
     wakeup::Wakeup,
 };
 
-// Type State Field
+// === Type State Field ===
+
+/// Marker type indicating the RF field is turned on
+///
+/// When in this state, the ST25R95 is actively generating an RF field and can
+/// communicate with NFC tags or act as a card in card emulation mode.
+///
+/// This is a required state for:
+/// - Sending commands to tags (reader mode)
+/// - Receiving tag responses (reader mode)
+/// - Listening for reader commands (card emulation mode)
+/// - Sending responses to readers (card emulation mode)
 #[derive(Debug, Default)]
 pub struct FieldOn;
+
+/// Marker type indicating the RF field is turned off
+///
+/// When in this state, the ST25R95 is not generating an RF field and has minimal
+/// power consumption. This is the default state after initialization and the
+/// recommended state when the driver is not actively communicating.
+///
+/// From this state, you must select a protocol to transition to `FieldOn`.
 #[derive(Debug, Default)]
 pub struct FieldOff;
 
-// Type State Role
+// === Type State Role ===
+
+/// Marker type indicating reader mode operation
+///
+/// In reader mode, the ST25R95 acts as an NFC reader/writer, communicating with
+/// external NFC tags. The driver generates the RF field and sends commands to
+/// tags, then receives and processes their responses.
+///
+/// Available operations:
+/// - `send_receive()`: Send commands and receive responses from tags
+/// - Protocol-specific register configuration (ARC_B, Timer Window, etc.)
+/// - `field_off()`: Turn off the RF field
 #[derive(Debug)]
 pub struct Reader;
+
+/// Marker type indicating card emulation mode operation
+///
+/// In card emulation mode, the ST25R95 emulates an NFC tag/card and responds to
+/// commands from external NFC readers. The driver listens for reader commands
+/// and sends appropriate responses.
+///
+/// The boolean parameter indicates whether the driver is currently in
+/// listening mode (`true`) or not (`false`).
+///
+/// Available operations:
+/// - `listen()`: Enter listening mode to wait for reader commands
+/// - `receive()`: Receive commands from external readers
+/// - `send()`: Send responses to external readers
+/// - Anti-collision filter management for Type A emulation
 #[derive(Debug)]
 pub struct CardEmulation(Listen);
+
+/// Marker type indicating no role has been selected
+///
+/// This is the initial state after driver creation. From this state, you must
+/// select either reader mode or card emulation mode to proceed with NFC operations.
 #[derive(Debug)]
 pub struct NoRole;
 
-// Type State Protocol
+// === Type State Protocol ===
+
+/// Marker type for ISO/IEC 15693 protocol (Vicinity cards)
+///
+/// The `Modulation` parameter specifies the modulation type used for communication:
+/// - 10% modulation: Standard, compatible with most 15693 tags
+/// - 100% modulation: Higher power, longer range but less compatible
+///
+/// This protocol supports:
+/// - Long-range communication (up to 1.5m)
+/// - Single and multiple card anticollision
+/// - Read/write operations on 15693 tags
+/// - Inventory commands for tag detection
 #[derive(Debug)]
 pub struct Iso15693(Modulation);
+
+/// Marker type for ISO/IEC 14443 Type A protocol
+///
+/// This protocol supports:
+/// - MIFARE Classic, MIFARE Ultralight, NTAG series tags
+/// - Short-range communication (up to 10cm)
+/// - Anticollision and cascading for UID detection
+/// - Authentication and encrypted communication (MIFARE Classic)
+/// - Fast read/write operations
+///
+/// In reader mode, this provides access to:
+/// - Configurable ARC_B register for optimal performance
+/// - Timer window configuration for improved demodulation
+///
+/// In card emulation mode, this provides:
+/// - Anti-collision filter for selective emulation
+/// - Configurable ACC_A register for load modulation
 #[derive(Debug)]
 pub struct Iso14443A;
+
+/// Marker type for ISO/IEC 14443 Type B protocol
+///
+/// This protocol supports:
+/// - Calypso cards and other Type B tags
+/// - Short-range communication (up to 10cm)
+/// - Different anticollision mechanism than Type A
+/// - Asynchronous communication
+///
+/// Reader mode features:
+/// - Configurable ARC_B register with different modulation options
+/// - Compatible with public transport and access control systems
 #[derive(Debug)]
 pub struct Iso14443B;
+
+/// Marker type for FeliCa protocol
+///
+/// This protocol supports:
+/// - FeliCa cards and tags (primarily used in Japan)
+/// - High-speed communication (212 kbps or 424 kbps)
+/// - Advanced security features
+/// - Suica, Pasmo, and other Japanese transit cards
+///
+/// Reader mode features:
+/// - Configurable ARC_B register for FeliCa-specific modulation
+/// - Auto-detect filter for improved synchronization
+/// - Optimized for high-speed polling applications
 #[derive(Debug)]
 pub struct FeliCa;
+
+/// Marker type indicating no protocol has been selected
+///
+/// This is the initial state after driver creation. From this state, you must
+/// select a specific protocol to proceed with NFC operations. Each protocol
+/// enables different capabilities and optimizations specific to that protocol.
 #[derive(Debug)]
 pub struct NoProtocol;
 
@@ -71,8 +256,60 @@ type ResultSt25r95ReaderFelica<S, G> = Result<St25r95<S, G, FieldOn, Reader, Fel
 type ResultSt25r95CardEmulationIso14443A<S, G> =
     Result<St25r95<S, G, FieldOn, CardEmulation, Iso14443A>>;
 
+/// Maximum buffer size for SPI communication with the ST25R95 chip
 pub const MAX_BUFFER_SIZE: usize = 530;
 
+/// Main driver struct for the ST25R95 NFC transceiver chip
+///
+/// This struct uses a type-state pattern to ensure correct usage at compile time.
+/// The generic parameters represent different states of the chip:
+///
+/// - **S**: SPI interface implementation (`St25r95Spi` trait)
+/// - **G**: GPIO interface implementation (`St25r95Gpio` trait)  
+/// - **F**: Field state - `FieldOn` or `FieldOff`
+/// - **R**: Role state - `Reader`, `CardEmulation`, or `NoRole`
+/// - **P**: Protocol state - `Iso15693`, `Iso14443A`, `Iso14443B`, `FeliCa`, or `NoProtocol`
+///
+/// ## State Transitions
+///
+/// The driver enforces a specific sequence of operations:
+///
+/// 1. **Initial state**: `FieldOff`, `NoRole`, `NoProtocol`
+/// 2. **Select protocol**: Transitions to `FieldOn`, `Reader`/`CardEmulation`, specific protocol
+/// 3. **Use protocol**: Send/receive data in the selected mode
+/// 4. **Turn off field**: Return to `FieldOff` state
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// // Create new driver instance
+/// let nfc = St25r95::new(spi, gpio)?;
+///
+/// // Select ISO14443A reader mode  
+/// let mut reader = nfc.protocol_select_iso14443a(Default::default())?;
+///
+/// // Send REQA command to detect cards
+/// let response = reader.send_receive(&[0x26])?;
+///
+/// // Turn off field when done
+/// let nfc = reader.field_off()?;
+/// ```
+///
+/// ```rust,ignore
+/// // Card emulation example
+/// let nfc = St25r95::new(spi, gpio)?;
+///
+/// // Select card emulation mode
+/// let mut card = nfc.protocol_select_ce_iso14443a(Default::default())?;
+///
+/// // Enter listening mode
+/// card.listen()?;
+///
+/// // Wait for reader commands
+/// let command = card.receive()?;
+/// // Process command and send response...
+/// card.send(&response_data)?;
+/// ```
 pub struct St25r95<S, G, F, R, P> {
     spi: S,
     gpio: G,
@@ -494,7 +731,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
 
 impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P> {
     /// This command sends data to a contactless tag and receives its reply.
-    /// If the tag response was received and decoded correctly, the <Data> field can
+    /// If the tag response was received and decoded correctly, the `<Data>` field can
     /// contain additional information which is protocol-specific.
     pub fn send_receive(&mut self, data: &[u8]) -> Result<ReadResponse> {
         self.spi.send_command(Command::SendRecv, data, false)?;
@@ -843,17 +1080,179 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     }
 }
 
+/// Response from ST25R95 command operations
+///
+/// This structure represents the complete response received from the ST25R95
+/// after executing a command. It contains both the status/error information
+/// and any data payload returned by the chip.
+///
+/// ## Response Format
+///
+/// The ST25R95 uses a specific response format that supports both short and
+/// long frames:
+///
+/// ```text
+/// [Status Byte] [Length Byte 1] [Length Byte 2] [Data...]
+/// ```
+///
+/// - **Status Byte**: Error flags and status indicators
+/// - **Length Bytes**: Data length (supports up to 530 bytes)
+/// - **Data**: Optional payload data (protocol-specific)
+///
+/// ## Status Code Interpretation
+///
+/// The status code contains error information and status flags:
+///
+/// - **Bit 7**: Protocol error flag
+/// - **Bit 6**: Collision detected flag  
+/// - **Bit 5-4**: Reserved
+/// - **Bit 3-0**: Error code (see St25r95Error enum)
+///
+/// A status code of 0x00 indicates success with no errors.
+/// Non-zero status codes should be interpreted using the `St25r95Error` enum.
+///
+/// ## Data Length Handling
+///
+/// The ST25R95 supports long frames for protocols that require large data
+/// transfers. The length encoding follows a specific pattern:
+///
+/// - **Short frames** (0-255 bytes): Standard single-byte length
+/// - **Long frames** (256-530 bytes): Extended length encoding
+///
+/// ## Usage Examples
+///
+/// ```rust,ignore
+/// // Send command and receive response
+/// let response = nfc.send_receive(&[0x26])?; // REQA command
+///
+/// // Check for errors
+/// if response.code != 0 {
+///     let hw_error = St25r95Error::from(response.code);
+///     return Err(Error::Hw(hw_error));
+/// }
+///
+/// // Process response data
+/// match response.data.len() {
+///     0 => println!("No data returned"),
+///     2 => println!("ATQA: {:02X?}", response.data),
+///     len => println!("Received {} bytes: {:02X?}", len, response.data),
+/// }
+///
+/// // Validate expected response length
+/// response.expect_data_len(2)?; // Expect exactly 2 bytes for ATQA
+/// ```
+///
+/// ## Error Handling
+///
+/// Always check the status code before processing data:
+///
+/// ```rust,ignore
+/// let response = nfc.send_receive(cmd)?;
+///
+/// // Convert status code to hardware error
+/// if response.code != 0 {
+///     match St25r95Error::from(response.code) {
+///         St25r95Error::FrameTimeoutOrNoTag => {
+///             // No tag present, handle gracefully
+///         },
+///         St25r95Error::CrcError => {
+///             // Data corruption, retry operation
+///         },
+///         error => {
+///             // Other hardware error
+///             return Err(Error::Hw(error));
+///         }
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadResponse {
+    /// Status/error code from the ST25R95
+    ///
+    /// This byte contains error flags and status information:
+    /// - 0x00: Success, no errors
+    /// - Other values: Error conditions (see St25r95Error)
+    ///
+    /// Use `St25r95Error::from(code)` to convert to a hardware error.
     pub code: u8,
+
+    /// Data payload returned by the ST25R95
+    ///
+    /// Contains the response data specific to the command and protocol used.
+    /// The content and format depend on the operation performed:
+    ///
+    /// - **Identification**: Chip information and version
+    /// - **Protocol operations**: Tag responses, authentication data, etc.
+    /// - **Register reads**: Register values
+    /// - **Field status**: Field detection results
+    ///
+    /// The maximum size is limited by `MAX_BUFFER_SIZE` (530 bytes).
     pub data: heapless::Vec<u8, MAX_BUFFER_SIZE>,
 }
 
 impl ReadResponse {
+    /// Extract the error code from a status byte
+    ///
+    /// This method filters out protocol-specific flags from the status byte
+    /// and returns only the error code portion. The ST25R95 status byte contains
+    /// both error codes and status flags that need to be separated.
+    ///
+    /// ## Status Byte Format
+    /// ```text
+    /// Bit 7: Protocol error flag
+    /// Bit 6: Collision detected flag
+    /// Bit 5-4: Reserved
+    /// Bit 3-0: Error code (filtered by this method)
+    /// ```
+    ///
+    /// ## Parameters
+    /// - `value`: Raw status byte from the ST25R95 response
+    ///
+    /// ## Returns
+    /// Error code portion (bits 3-0) that can be converted to `St25r95Error`
+    ///
+    /// ## Example
+    /// ```rust,ignore
+    /// let raw_status = 0x8D; // CRC error with protocol flag
+    /// let error_code = ReadResponse::code(raw_status); // 0x0D
+    /// let hw_error = St25r95Error::from(error_code); // St25r95Error::CrcError
+    /// ```
     pub fn code(value: u8) -> u8 {
         value & 0b1001_1111
     }
 
+    /// Decode data length from ST25R95 response header
+    ///
+    /// The ST25R95 uses a variable-length encoding to support both short and
+    /// long frames. This method decodes the length bytes from the response
+    /// header according to the protocol specification.
+    ///
+    /// ## Length Encoding
+    ///
+    /// **Short frames (0-255 bytes)**:
+    /// ```text
+    /// [0x00-0x7F] [Length] -> Length = second byte
+    /// ```
+    ///
+    /// **Long frames (256-530 bytes)**:
+    /// ```text
+    /// [0x80-0x8F] [Length] -> Length = 256 + second byte + (bits 5-6 << 8)
+    /// ```
+    ///
+    /// ## Parameters
+    /// - `value`: Array containing the two length bytes from response header
+    ///
+    /// ## Returns
+    /// Decoded data length in bytes (0-530)
+    ///
+    /// ## Example
+    /// ```rust,ignore
+    /// // Short frame: 10 bytes
+    /// assert_eq!(ReadResponse::data_len([0x00, 10]), 10);
+    ///
+    /// // Long frame: 300 bytes  
+    /// assert_eq!(ReadResponse::data_len([0x81, 44]), 300);
+    /// ```
     pub fn data_len(value: [u8; 2]) -> usize {
         // See datasheet section 4.3 (Support of long frames)
         value[1] as usize
@@ -864,6 +1263,34 @@ impl ReadResponse {
             }
     }
 
+    /// Validate that response contains expected number of data bytes
+    ///
+    /// This convenience method validates that the response data length matches
+    /// the expected length for the specific command/protocol. This is useful
+    /// for ensuring protocol compliance and detecting malformed responses.
+    ///
+    /// ## Parameters
+    /// - `expected`: Expected number of data bytes
+    ///
+    /// ## Returns
+    /// - `Ok(())`: Response length matches expectation
+    /// - `Err(Error::InvalidResponseLength)`: Length mismatch
+    ///
+    /// ## Example
+    /// ```rust,ignore
+    /// let response = nfc.send_receive(&[0x26])?; // REQA command
+    ///
+    /// // ISO14443A ATQA should be exactly 2 bytes
+    /// response.expect_data_len(2)?;
+    /// let atqa = u16::from_le_bytes([response.data[0], response.data[1]]);
+    /// ```
+    ///
+    /// ## Common Expected Lengths
+    ///
+    /// - **REQA (ISO14443A)**: 2 bytes (ATQA)
+    /// - **Read UID (ISO14443A)**: 5-10 bytes (depending on UID size)
+    /// - **Inventory (ISO15693)**: Variable, depends on number of tags
+    /// - **IDN command**: 13 bytes + 2 bytes CRC
     pub fn expect_data_len(&self, expected: usize) -> Result<()> {
         if self.data.len() != expected {
             Err(Error::InvalidResponseLength {

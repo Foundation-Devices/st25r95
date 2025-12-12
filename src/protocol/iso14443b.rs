@@ -1,6 +1,67 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! ISO/IEC 14443 Type B Protocol Support
+//!
+//! This module provides support for the ISO/IEC 14443 Type B protocol, a robust
+//! NFC communication standard commonly used for high-security applications. Type B
+//! is the foundation for:
+//!
+//! - **Electronic passports**: ICAO-compliant travel documents
+//! - **National ID cards**: Government-issued identification
+//! - **Secure payment cards**: Visa, Mastercard EMV applications
+//! - **Healthcare cards**: Patient identification and insurance cards
+//! - **Transportation cards**: High-security transit systems
+//!
+//! ## Protocol Characteristics
+//!
+//! - **Communication Range**: Up to 10 cm (typically 3-7 cm)
+//! - **Data Rates**: 106 kbps, 212 kbps, 424 kbps, 848 kbps
+//! - **Anticollision**: Uses probabilistic slot marker mechanism
+//! - **Security**: Enhanced security with advanced cryptographic support
+//! - **Power**: Passive tags powered by RF field with collision avoidance
+//!
+//! ## Key Differences from Type A
+//!
+//! Type B offers several advantages over Type A:
+//! - **Better anticollision**: More robust collision detection and avoidance
+//! - **Higher security**: Enhanced cryptographic capabilities
+//! - **Lower collision probability**: More reliable in multi-tag environments
+//! - **State machine based**: More deterministic communication
+//!
+//! ## Reader Mode Features
+//!
+//! The reader mode implementation provides:
+//! - **Configurable speeds** (26kbps, 52kbps, 6kbps) for different tag types
+//! - **Adjustable modulation** (100% or 10% ASK) for power efficiency
+//! - **Subcarrier selection** (single or double) for optimal performance
+//! - **SOF detection** for enhanced frame synchronization
+//! - **CRC validation** for data integrity
+//!
+//! ## Typical Applications
+//!
+//! Type B is preferred for applications requiring:
+//! - **High security** with cryptographic operations
+//! - **Multi-tag environments** with reliable anticollision
+//! - **Government identification** with compliance requirements
+//! - **International standards** compatibility (ICAO, ISO/IEC 7816)
+//!
+//! ## Usage Examples
+//!
+//! ```rust,ignore
+//! // Reader mode with default settings
+//! let mut reader = nfc.protocol_select_iso14443b(Default::default())?;
+//!
+//! // Send ATTRIB command to select Type B card
+//! let response = reader.send_receive(&[0x1D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00])?;
+//!
+//! // Configure for high-security applications
+//! let params = iso14443b::reader::Parameters::new()
+//!     .speed(iso14443b::reader::Speed::Kbps52)
+//!     .modulation(iso14443b::reader::Modulation::Percent100)
+//!     .wait_for_sof();
+//! ```
+
 pub mod reader {
     use super::super::ProtocolParams;
 
