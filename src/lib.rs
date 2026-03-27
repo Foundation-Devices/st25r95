@@ -149,7 +149,7 @@ pub struct FieldOff;
 /// - `send_receive()`: Send commands and receive responses from tags
 /// - Protocol-specific register configuration (ARC_B, Timer Window, etc.)
 /// - `field_off()`: Turn off the RF field
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Reader;
 
 /// Marker type indicating card emulation mode operation
@@ -208,7 +208,7 @@ pub struct Iso15693(Modulation);
 /// In card emulation mode, this provides:
 /// - Anti-collision filter for selective emulation
 /// - Configurable ACC_A register for load modulation
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Iso14443A;
 
 /// Marker type for ISO/IEC 14443 Type B protocol
@@ -222,7 +222,7 @@ pub struct Iso14443A;
 /// Reader mode features:
 /// - Configurable ARC_B register with different modulation options
 /// - Compatible with public transport and access control systems
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Iso14443B;
 
 /// Marker type for FeliCa protocol
@@ -237,7 +237,7 @@ pub struct Iso14443B;
 /// - Configurable ARC_B register for FeliCa-specific modulation
 /// - Auto-detect filter for improved synchronization
 /// - Optimized for high-speed polling applications
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FeliCa;
 
 /// Marker type indicating no protocol has been selected
@@ -624,7 +624,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             .send_command(Command::WrReg, &data[..data_len], false)?;
 
         let response = self.read()?;
-        if response.data.len() != 0 {
+        if !response.data.is_empty() {
             Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response.data.len(),
@@ -745,15 +745,6 @@ impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P
 
     pub fn write_arc_b(&mut self, arc_b: ArcB) -> Result<()> {
         self._write_register(&arc_b, false, Some(arc_b.value()))
-    }
-
-    /// The Echo command verifies the possibility of communication between a Host and the
-    /// ST25R95.
-    pub fn echo(&mut self) -> Result<()> {
-        self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[], false)?;
-        self.poll_irq_out(100)?;
-        self.spi.read_data().map(|_| ())
     }
 }
 
@@ -934,7 +925,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
 
         let response = self.read()?;
         response.expect_data_len(0)?;
-        if response.data.len() != 0 {
+        if !response.data.is_empty() {
             Err(Error::InvalidResponseLength {
                 expected: 0,
                 actual: response.data.len(),
