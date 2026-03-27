@@ -312,6 +312,38 @@ impl From<u8> for TransmissionFlags {
     }
 }
 
+impl TransmissionFlags {
+    pub fn with_significant_bits(significant_bits: u8) -> Self {
+        Self {
+            topaz: false,
+            split_frame: false,
+            append_crc: false,
+            parity_frame_mode: false,
+            number_of_significant_bits_in_last_byte: significant_bits & 0x0F,
+        }
+    }
+
+    pub fn split_frame(mut self) -> Self {
+        self.split_frame = true;
+        self
+    }
+
+    pub fn append_crc(mut self) -> Self {
+        self.append_crc = true;
+        self
+    }
+
+    pub fn topaz(mut self) -> Self {
+        self.topaz = true;
+        self
+    }
+
+    pub fn parity_frame_mode(mut self) -> Self {
+        self.parity_frame_mode = true;
+        self
+    }
+}
+
 impl From<TransmissionFlags> for u8 {
     fn from(value: TransmissionFlags) -> Self {
         (value.topaz as u8) << 7
@@ -375,6 +407,11 @@ pub struct ReceptionFlags {
     index_of_the_first_byte_where_collision_was_detected: u8,
     /// Only valid when collision_detected is true
     index_of_the_first_bit_where_collision_was_detected: u8,
+}
+
+impl ReceptionFlags {
+    /// Size in bytes of the reception flags appended to ISO14443A responses.
+    pub const SIZE: usize = 3;
 }
 
 impl TryFrom<[u8; 3]> for ReceptionFlags {

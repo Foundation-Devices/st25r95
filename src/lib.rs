@@ -91,6 +91,7 @@ pub use {
         command::{Command, CtrlResConf, IdleParams},
         control::{Control, PollFlags},
         protocol::*,
+        register::arc_b::{ModulationIndex, ReceiverGain},
         register::*,
     },
     error::{Error, Result, St25r95Error},
@@ -99,7 +100,7 @@ pub use {
 };
 use {
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
-    arc_b::{ArcB, ModulationIndex, ReceiverGain},
+    arc_b::ArcB,
     auto_detect_filter::AutoDetectFilter,
     command::{DacData, LFOFreq, WaitForField, WakeUpSource},
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
