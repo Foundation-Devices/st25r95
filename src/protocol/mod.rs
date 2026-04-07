@@ -63,7 +63,7 @@ pub enum Protocol {
     ///
     /// Long-range protocol (up to 1.5m) for:
     /// - Inventory management and asset tracking
-    /// - Library books and retail items  
+    /// - Library books and retail items
     /// - Animal identification
     /// - Access control at distances
     ///
@@ -123,7 +123,7 @@ pub enum Protocol {
     ///
     /// Configures the ST25R95 to act as an ISO14443-A tag/card for:
     /// - Payment card emulation
-    /// - Access token emulation  
+    /// - Access token emulation
     /// - Peer-to-peer NFC communication
     /// - Custom tag implementations
     ///

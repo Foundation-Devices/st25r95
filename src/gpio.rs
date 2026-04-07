@@ -125,5 +125,6 @@ pub trait St25r95Gpio {
     ///     self.wait_for_interrupt(timeout)
     /// }
     /// ```
+    #[allow(clippy::result_unit_err)]
     fn wait_irq_out_falling_edge(&mut self, timeout: u32) -> Result<(), ()>;
 }

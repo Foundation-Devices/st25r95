@@ -100,7 +100,7 @@ pub enum Command {
     ///
     /// Used for:
     /// - Payment card emulation
-    /// - Access token simulation  
+    /// - Access token simulation
     /// - Peer-to-peer communication
     Listen = 0x05,
 

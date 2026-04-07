@@ -13,7 +13,11 @@
     git
   ];
 
-  languages.rust.enable = true;
+  languages.rust = {
+    enable = true;
+    channel = "nightly";
+    targets = [ "thumbv7em-none-eabi" ];
+  };
 
   enterShell = ''
     git --version # Use packages

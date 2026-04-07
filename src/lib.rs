@@ -5,14 +5,15 @@
 
 //! # ST25R95 NFC Transceiver Driver
 //!
-//! This crate provides a high-level, type-safe driver for the ST25R95 NFC transceiver chip
-//! from STMicroelectronics. The ST25R95 is a multi-protocol NFC transceiver supporting
-//! reader and card emulation modes for various NFC protocols.
+//! This crate provides a high-level, type-safe driver for the ST25R95 NFC transceiver
+//! chip from STMicroelectronics. The ST25R95 is a multi-protocol NFC transceiver
+//! supporting reader and card emulation modes for various NFC protocols.
 //!
 //! ## Features
 //!
 //! - **Multi-protocol support**: ISO/IEC 14443A/B, ISO/IEC 15693, and FeliCa protocols
-//! - **Reader and Card Emulation modes**: Operate as either an NFC reader or emulate a card
+//! - **Reader and Card Emulation modes**: Operate as either an NFC reader or emulate a
+//!   card
 //! - **Type-state pattern**: Compile-time guarantees for correct usage sequences
 //! - **Hardware abstraction**: Trait-based SPI and GPIO interfaces for flexibility
 //! - **Embedded-friendly**: `no_std` compatible with minimal dependencies
@@ -20,17 +21,21 @@
 //!
 //! ## Type State Pattern
 //!
-//! This driver uses a sophisticated type-state pattern to prevent incorrect usage at compile time.
-//! The main `St25r95` struct is parameterized by five type state markers:
+//! This driver uses a sophisticated type-state pattern to prevent incorrect usage at
+//! compile time. The main `St25r95` struct is parameterized by five type state markers:
 //!
-//! - **Field State** (`F`): `FieldOn` or `FieldOff` - controls whether the RF field is active
-//! - **Role State** (`R`): `Reader`, `CardEmulation`, or `NoRole` - defines the operating mode
-//! - **Protocol State** (`P`): `Iso15693`, `Iso14443A`, `Iso14443B`, `FeliCa`, or `NoProtocol`
+//! - **Field State** (`F`): `FieldOn` or `FieldOff` - controls whether the RF field is
+//!   active
+//! - **Role State** (`R`): `Reader`, `CardEmulation`, or `NoRole` - defines the operating
+//!   mode
+//! - **Protocol State** (`P`): `Iso15693`, `Iso14443A`, `Iso14443B`, `FeliCa`, or
+//!   `NoProtocol`
 //! - **SPI Interface** (`S`): User-provided implementation of `St25r95Spi`
 //! - **GPIO Interface** (`G`): User-provided implementation of `St25r95Gpio`
 //!
 //! This ensures that operations are only available when the chip is in the correct state.
-//! For example, you can only send/receive data when the field is on and a protocol is selected.
+//! For example, you can only send/receive data when the field is on and a protocol is
+//! selected.
 //!
 //! ## Basic Usage
 //!
@@ -91,8 +96,10 @@ pub use {
         command::{Command, CtrlResConf, IdleParams},
         control::{Control, PollFlags},
         protocol::*,
-        register::arc_b::{ModulationIndex, ReceiverGain},
-        register::*,
+        register::{
+            arc_b::{ModulationIndex, ReceiverGain},
+            *,
+        },
     },
     error::{Error, Result, St25r95Error},
     gpio::St25r95Gpio,
@@ -106,7 +113,9 @@ use {
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     iso14443a::{
         card_emulation::{AntiColState, Listen},
-        ATQA, SAK, UID,
+        ATQA,
+        SAK,
+        UID,
     },
     iso15693::reader::Modulation,
     timer_window::TimerWindow,
@@ -266,17 +275,19 @@ pub const MAX_BUFFER_SIZE: usize = 530;
 /// The generic parameters represent different states of the chip:
 ///
 /// - **S**: SPI interface implementation (`St25r95Spi` trait)
-/// - **G**: GPIO interface implementation (`St25r95Gpio` trait)  
+/// - **G**: GPIO interface implementation (`St25r95Gpio` trait)
 /// - **F**: Field state - `FieldOn` or `FieldOff`
 /// - **R**: Role state - `Reader`, `CardEmulation`, or `NoRole`
-/// - **P**: Protocol state - `Iso15693`, `Iso14443A`, `Iso14443B`, `FeliCa`, or `NoProtocol`
+/// - **P**: Protocol state - `Iso15693`, `Iso14443A`, `Iso14443B`, `FeliCa`, or
+///   `NoProtocol`
 ///
 /// ## State Transitions
 ///
 /// The driver enforces a specific sequence of operations:
 ///
 /// 1. **Initial state**: `FieldOff`, `NoRole`, `NoProtocol`
-/// 2. **Select protocol**: Transitions to `FieldOn`, `Reader`/`CardEmulation`, specific protocol
+/// 2. **Select protocol**: Transitions to `FieldOn`, `Reader`/`CardEmulation`, specific
+///    protocol
 /// 3. **Use protocol**: Send/receive data in the selected mode
 /// 4. **Turn off field**: Return to `FieldOff` state
 ///
@@ -1096,7 +1107,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
 /// The status code contains error information and status flags:
 ///
 /// - **Bit 7**: Protocol error flag
-/// - **Bit 6**: Collision detected flag  
+/// - **Bit 6**: Collision detected flag
 /// - **Bit 5-4**: Reserved
 /// - **Bit 3-0**: Error code (see St25r95Error enum)
 ///

@@ -28,7 +28,6 @@
 //! 3. **Command-based**: Registers accessed via RdReg/WrReg commands
 //!
 //! ## Register Programming Guidelines
-//!
 /// ### Protocol-Specific Optimization
 ///
 /// Each NFC protocol has optimal register settings:
@@ -94,11 +93,11 @@ pub mod wakeup;
 ///
 /// The ST25R95 supports two register access methods:
 ///
-/// 1. **Direct Access**: Most registers can be accessed directly using
-///    their read/write addresses without additional setup.
+/// 1. **Direct Access**: Most registers can be accessed directly using their read/write
+///    addresses without additional setup.
 ///
-/// 2. **Indexed Access**: Some registers (typically with multiple instances)
-///    require setting an index first, then accessing the register.
+/// 2. **Indexed Access**: Some registers (typically with multiple instances) require
+///    setting an index first, then accessing the register.
 ///
 /// ## Implementation Notes
 ///
@@ -109,7 +108,7 @@ pub mod wakeup;
 /// ## Method Descriptions
 ///
 /// - `read_addr()`: Register address for read operations
-/// - `write_addr()`: Register address for write operations  
+/// - `write_addr()`: Register address for write operations
 /// - `index_confirmation()`: Index value for indexed register access
 /// - `has_index()`: Whether this register requires indexed access
 /// - `value()`: Current register value to be written

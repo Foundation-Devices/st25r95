@@ -7,7 +7,7 @@
 //! widely used NFC protocols. Type A is the foundation for:
 //!
 //! - **MIFARE Classic**: Contactless smart cards used for transit, access control
-//! - **MIFARE Ultralight/Light**: Low-cost tags for retail and logistics  
+//! - **MIFARE Ultralight/Light**: Low-cost tags for retail and logistics
 //! - **NTAG series**: NFC Forum Type 2 tags for NFC applications
 //! - **Payment cards**: EMV contactless payment cards
 //! - **NFC Forum Type 4**: Advanced NFC applications with NDEF support
@@ -292,10 +292,10 @@ pub struct TransmissionFlags {
     /// if set then the parity bit must be coded inside the data for each byte to be sent
     /// using the send/receive command in transmit mode, and is not decoded by the
     /// ST25R95 in receive mode. In Receive mode, each data byte is accompanied by an
-    /// additional byte which encodes the parity: `<data byte>` `<parity byte>` `<data byte>`.
-    /// The parity framing mode is compatible with MIFARE® classic requirements. However,
-    /// access to authenticated state must be supported by the external secure host which
-    /// embeds the MIFARE® classic library.
+    /// additional byte which encodes the parity: `<data byte>` `<parity byte>` `<data
+    /// byte>`. The parity framing mode is compatible with MIFARE® classic
+    /// requirements. However, access to authenticated state must be supported by the
+    /// external secure host which embeds the MIFARE® classic library.
     parity_frame_mode: bool,
     number_of_significant_bits_in_last_byte: u8,
 }
