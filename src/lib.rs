@@ -93,7 +93,7 @@ mod spi;
 
 pub use {
     crate::{
-        command::{Command, CtrlResConf, IdleParams},
+        command::{Command, CtrlResConf, DacData, IdleParams, LFOFreq, WakeUpSource},
         control::{Control, PollFlags},
         protocol::*,
         register::{
@@ -109,7 +109,7 @@ use {
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
     arc_b::ArcB,
     auto_detect_filter::AutoDetectFilter,
-    command::{DacData, LFOFreq, WaitForField, WakeUpSource},
+    command::WaitForField,
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     iso14443a::{
         card_emulation::{AntiColState, Listen},
@@ -176,7 +176,7 @@ pub struct Reader;
 /// - `receive()`: Receive commands from external readers
 /// - `send()`: Send responses to external readers
 /// - Anti-collision filter management for Type A emulation
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CardEmulation(Listen);
 
 /// Marker type indicating no role has been selected
@@ -560,7 +560,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         }
     }
 
-    fn _idle(&mut self, mut params: IdleParams, check_params: bool) -> Result<WakeUpSource> {
+    fn _idle_send(&mut self, mut params: IdleParams, check_params: bool) -> Result<()> {
         if check_params && params.wus.tag_detection {
             match self.dac_ref {
                 None => return Err(Error::CalibrationNeeded),
@@ -584,8 +584,11 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         }
         self.spi
             .send_command(Command::Idle, &params.data(), false)?;
+        Ok(())
+    }
 
-        let response = self.read()?;
+    fn _ack_idle(&mut self) -> Result<WakeUpSource> {
+        let response = self.spi.read_data()?;
         if response.data.len() != 1 {
             Err(Error::InvalidResponseLength {
                 expected: 1,
@@ -594,8 +597,13 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         } else {
             WakeUpSource::try_from(response.data[0])
                 .map_err(|_| Error::InvalidWakeUpSource(response.data[0]))
-            // should be in WaitForEvent state
         }
+    }
+
+    fn _idle(&mut self, params: IdleParams, check_params: bool) -> Result<WakeUpSource> {
+        self._idle_send(params, check_params)?;
+        self.poll_irq_out(100)?;
+        self._ack_idle()
     }
 
     /// This command switches the ST25R95 into low power consumption mode and defines the
@@ -606,6 +614,32 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     /// Application has to rely on IRQ_OUT before reading the answer to the Idle command.
     pub fn idle(&mut self, params: IdleParams) -> Result<WakeUpSource> {
         self._idle(params, true)
+    }
+
+    /// Send the Idle command without waiting for the chip to wake up.
+    ///
+    /// Use this when the wake-up event will be signalled out-of-band (typically a
+    /// GPIO interrupt on IRQ_OUT delivered to the application). After IRQ_OUT
+    /// goes low the caller must read the deferred response by calling
+    /// [`ack_idle`](Self::ack_idle); failing to do so leaves the response byte
+    /// in the chip's SPI buffer, which the next SPI command may read instead of
+    /// its own response.
+    ///
+    /// As with [`idle`](Self::idle), passing a [`WakeUpSource`] with
+    /// `tag_detection: true` requires a prior successful
+    /// [`calibrate_tag_detector`](Self::calibrate_tag_detector) call.
+    pub fn idle_async(&mut self, params: IdleParams) -> Result<()> {
+        self._idle_send(params, true)
+    }
+
+    /// Read and parse the deferred response of an [`idle_async`](Self::idle_async).
+    ///
+    /// The caller is responsible for ensuring IRQ_OUT has gone low before
+    /// calling this method (otherwise the SPI read will return whatever stale
+    /// bytes are in the chip's buffer). On success returns the
+    /// [`WakeUpSource`] indicating which wake-up event woke the chip.
+    pub fn ack_idle(&mut self) -> Result<WakeUpSource> {
+        self._ack_idle()
     }
 
     fn _write_register(
@@ -689,6 +723,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
                 timeout: true,
             },
             enter_ctrl: CtrlResConf {
+                field_detect_aux_enabled: false,
                 field_detector_enabled: false,
                 iref_enabled: false,
                 dac_comp_high: true,
@@ -699,6 +734,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
                 sleep_state_enabled: true,
             },
             wu_ctrl: CtrlResConf {
+                field_detect_aux_enabled: false,
                 field_detector_enabled: false,
                 iref_enabled: true,
                 dac_comp_high: true,
@@ -1066,15 +1102,19 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
         response.expect_data_len(0)
     }
 
-    /// The Echo command verifies the possibility of communication between a Host and the
-    /// ST25R95.
-    pub fn echo(&mut self) -> Result<()> {
+    /// Cancel an active Listen mode by sending an Echo command from the host.
+    ///
+    /// Per the datasheet, the chip exits Listen mode when it receives an Echo
+    /// from the MCU; the chip then surfaces a `UserStop` error which this
+    /// helper consumes to flip the internal listen flag back to false. Use
+    /// when the application needs to abort an outstanding `listen()` (e.g.
+    /// session timeout) before sending another command.
+    pub fn cancel_listen(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
         match self.spi.read_data().map(|_| ()) {
             Err(Error::Hw(St25r95Error::UserStop)) if self.role.0 => {
-                /* Listening mode was cancelled by the application */
                 self.role.0 = false;
                 Ok(())
             }

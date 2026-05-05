@@ -528,6 +528,17 @@ impl TryFrom<u8> for WakeUpSource {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct CtrlResConf {
+    /// EnterCtrl/WuCtrl bit 14. Required to be set in EnterCtrl when waking
+    /// on FieldDetect — observed empirically: the ST25R95 reference RFAL
+    /// driver hardcodes it (`0x42` in the Idle template's high byte) along
+    /// with `field_detector_enabled` (bit 9), and without it the chip
+    /// enters a power state from which `IRQ_IN pulse + Reset + IDN` does
+    /// not revive it (the SPI MISO line stays at `0xff`, chip not driving).
+    /// Likely the analog support circuit for the FieldDetector (the
+    /// digital comparator output is `field_detector_enabled`); the bit is
+    /// not symbolically named in the ST25R95 driver headers shipped with
+    /// RFAL, so the name here is a best guess pending datasheet access.
+    pub field_detect_aux_enabled: bool,
     pub field_detector_enabled: bool,
     pub iref_enabled: bool, /* TODO: Must to be set to 1 in WUCtrl for tag detection
                              * operations, otherwise must be put to 0 */
@@ -542,6 +553,7 @@ pub struct CtrlResConf {
 impl Default for CtrlResConf {
     fn default() -> Self {
         Self {
+            field_detect_aux_enabled: false,
             field_detector_enabled: false,
             iref_enabled: false,
             dac_comp_high: false,
@@ -556,7 +568,8 @@ impl Default for CtrlResConf {
 
 impl From<CtrlResConf> for u16 {
     fn from(ctrl: CtrlResConf) -> Self {
-        (ctrl.field_detector_enabled as u16) << 9
+        (ctrl.field_detect_aux_enabled as u16) << 14
+            | (ctrl.field_detector_enabled as u16) << 9
             | (ctrl.iref_enabled as u16) << 8
             | (ctrl.dac_comp_high as u16) << 7
             | (ctrl.lfo_enabled as u16) << 5
@@ -721,6 +734,7 @@ impl Default for IdleParams {
             enter_ctrl: CtrlResConf::default(),
             wu_ctrl: CtrlResConf::default(),
             leave_ctrl: CtrlResConf {
+                field_detect_aux_enabled: false,
                 field_detector_enabled: false,
                 iref_enabled: false,
                 dac_comp_high: false,
