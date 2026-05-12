@@ -404,7 +404,7 @@ impl From<u8> for St25r95Error {
             0x67 => St25r95Error::TrlTooBig,
             0x68 => St25r95Error::TrlTooSmall,
             0x71 => St25r95Error::Internal,
-            // 0x80 => St25r95Error::FrameRecvOK, // not really an error
+            0x80 => St25r95Error::FrameRecvOK, // not really an error
             0x82 => St25r95Error::InvalidCommandLength,
             0x83 => St25r95Error::InvalidProtocol,
             0x85 => St25r95Error::UserStop,
@@ -418,7 +418,7 @@ impl From<u8> for St25r95Error {
             0x8D => St25r95Error::CrcError,
             0x8E => St25r95Error::ReceptionLostWithoutEof,
             0x8F => St25r95Error::NoField,
-            // 0x90 => St25r95Error::UintByte, // not really an error
+            0x90 => St25r95Error::UintByte, // not really an error
             other => St25r95Error::UnknownError(other),
         }
     }

@@ -361,7 +361,8 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
-        self.spi.read_data().map(|_| ())
+        let response = self.spi.read_data()?;
+        response.expect_data_len(0)
     }
 }
 
@@ -385,7 +386,8 @@ impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldO
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
-        self.spi.read_data().map(|_| ())
+        let response = self.spi.read_data()?;
+        response.expect_data_len(0)
     }
 }
 
@@ -550,6 +552,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         }
 
         let response = self.read()?;
+        response.ensure_ok()?;
         match response.data.len() {
             0 => Ok(false),
             1 => Ok(response.data[0] & 0x01 == 1),
@@ -589,15 +592,9 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
 
     fn _ack_idle(&mut self) -> Result<WakeUpSource> {
         let response = self.spi.read_data()?;
-        if response.data.len() != 1 {
-            Err(Error::InvalidResponseLength {
-                expected: 1,
-                actual: response.data.len(),
-            })
-        } else {
-            WakeUpSource::try_from(response.data[0])
-                .map_err(|_| Error::InvalidWakeUpSource(response.data[0]))
-        }
+        response.expect_data_len(1)?;
+        WakeUpSource::try_from(response.data[0])
+            .map_err(|_| Error::InvalidWakeUpSource(response.data[0]))
     }
 
     fn _idle(&mut self, params: IdleParams, check_params: bool) -> Result<WakeUpSource> {
@@ -672,14 +669,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             .send_command(Command::WrReg, &data[..data_len], false)?;
 
         let response = self.read()?;
-        if !response.data.is_empty() {
-            Err(Error::InvalidResponseLength {
-                expected: 0,
-                actual: response.data.len(),
-            })
-        } else {
-            Ok(())
-        }
+        response.expect_data_len(0)
     }
 
     fn read_register(&mut self, reg: &impl Register) -> Result<u8> {
@@ -694,14 +684,8 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         self.spi.send_command(Command::RdReg, &data, false)?;
 
         let response = self.read()?;
-        if response.data.len() != 1 {
-            Err(Error::InvalidResponseLength {
-                expected: 1,
-                actual: response.data.len(),
-            })
-        } else {
-            Ok(response.data[0])
-        }
+        response.expect_data_len(1)?;
+        Ok(response.data[0])
     }
 
     /// This command is used to read the Wakeup register.
@@ -792,6 +776,10 @@ impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P
     /// This command sends data to a contactless tag and receives its reply.
     /// If the tag response was received and decoded correctly, the `<Data>` field can
     /// contain additional information which is protocol-specific.
+    ///
+    /// This returns the raw command response. Protocol operations can validly surface
+    /// status bytes that callers may want to inspect themselves, so this method does
+    /// not call [`ReadResponse::ensure_ok`].
     pub fn send_receive(&mut self, data: &[u8]) -> Result<ReadResponse> {
         self.spi.send_command(Command::SendRecv, data, false)?;
         self.read()
@@ -989,15 +977,8 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
 
         let response = self.read()?;
         response.expect_data_len(0)?;
-        if !response.data.is_empty() {
-            Err(Error::InvalidResponseLength {
-                expected: 0,
-                actual: response.data.len(),
-            })
-        } else {
-            self.role.0 = true;
-            Ok(())
-        }
+        self.role.0 = true;
+        Ok(())
     }
 
     /// Receive data from the reader through the ST25R95 in Listen mode.
@@ -1130,7 +1111,8 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.spi.send_command(Command::Echo, &[], false)?;
         self.poll_irq_out(100)?;
-        match self.spi.read_data().map(|_| ()) {
+        let response = self.spi.read_data()?;
+        match response.expect_data_len(0) {
             Err(Error::Hw(St25r95Error::UserStop)) if self.role.0 => {
                 self.role.0 = false;
                 Ok(())
@@ -1233,7 +1215,8 @@ pub struct ReadResponse {
     /// - 0x00: Success, no errors
     /// - Other values: Error conditions (see St25r95Error)
     ///
-    /// Use `St25r95Error::from(code)` to convert to a hardware error.
+    /// Use [`ReadResponse::ensure_ok`] to convert error status codes into
+    /// [`Error::Hw`].
     pub code: u8,
 
     /// Data payload returned by the ST25R95
@@ -1251,11 +1234,11 @@ pub struct ReadResponse {
 }
 
 impl ReadResponse {
-    /// Extract the error code from a status byte
+    /// Extract the status code from a response header byte
     ///
-    /// This method filters out protocol-specific flags from the status byte
-    /// and returns only the error code portion. The ST25R95 status byte contains
-    /// both error codes and status flags that need to be separated.
+    /// This method preserves hardware error status bytes, while normalizing the
+    /// long-frame success header variants that encode payload length bits in the
+    /// status byte.
     ///
     /// ## Status Byte Format
     /// ```text
@@ -1269,16 +1252,31 @@ impl ReadResponse {
     /// - `value`: Raw status byte from the ST25R95 response
     ///
     /// ## Returns
-    /// Error code portion (bits 3-0) that can be converted to `St25r95Error`
+    /// Status code that can be converted to `St25r95Error`
     ///
     /// ## Example
     /// ```rust,ignore
     /// let raw_status = 0x8D; // CRC error with protocol flag
-    /// let error_code = ReadResponse::code(raw_status); // 0x0D
+    /// let error_code = ReadResponse::code(raw_status); // 0x8D
     /// let hw_error = St25r95Error::from(error_code); // St25r95Error::CrcError
     /// ```
     pub fn code(value: u8) -> u8 {
-        value & 0b1001_1111
+        if value & 0x8F == 0x80 {
+            value & 0x90
+        } else {
+            value
+        }
+    }
+
+    /// Validate that the response status is not a hardware error.
+    ///
+    /// `0x80` and `0x90` are accepted because they are used by the ST25R95
+    /// response framing for successfully received frames.
+    pub fn ensure_ok(&self) -> Result<()> {
+        match self.code {
+            0x00 | 0x80 | 0x90 => Ok(()),
+            code => Err(Error::Hw(St25r95Error::from(code))),
+        }
     }
 
     /// Decode data length from ST25R95 response header
@@ -1325,15 +1323,16 @@ impl ReadResponse {
 
     /// Validate that response contains expected number of data bytes
     ///
-    /// This convenience method validates that the response data length matches
-    /// the expected length for the specific command/protocol. This is useful
-    /// for ensuring protocol compliance and detecting malformed responses.
+    /// This convenience method first validates the response status with
+    /// [`ReadResponse::ensure_ok`], then validates that the response data length
+    /// matches the expected length for the specific command/protocol.
     ///
     /// ## Parameters
     /// - `expected`: Expected number of data bytes
     ///
     /// ## Returns
-    /// - `Ok(())`: Response length matches expectation
+    /// - `Ok(())`: Response status is OK and length matches expectation
+    /// - `Err(Error::Hw(_))`: Hardware reported a non-success status
     /// - `Err(Error::InvalidResponseLength)`: Length mismatch
     ///
     /// ## Example
@@ -1352,6 +1351,7 @@ impl ReadResponse {
     /// - **Inventory (ISO15693)**: Variable, depends on number of tags
     /// - **IDN command**: 13 bytes + 2 bytes CRC
     pub fn expect_data_len(&self, expected: usize) -> Result<()> {
+        self.ensure_ok()?;
         if self.data.len() != expected {
             Err(Error::InvalidResponseLength {
                 expected,
@@ -1419,6 +1419,17 @@ mod tests {
         command: Option<Command>,
         data: heapless::Vec<u8, 16>,
         sod: bool,
+        response_code: u8,
+        response_data: heapless::Vec<u8, MAX_BUFFER_SIZE>,
+    }
+
+    impl RecordingSpi {
+        fn with_response_code(response_code: u8) -> Self {
+            Self {
+                response_code,
+                ..Default::default()
+            }
+        }
     }
 
     impl St25r95Spi for RecordingSpi {
@@ -1440,8 +1451,8 @@ mod tests {
 
         fn read_data(&mut self) -> Result<ReadResponse> {
             Ok(ReadResponse {
-                code: 0,
-                data: heapless::Vec::new(),
+                code: self.response_code,
+                data: self.response_data.clone(),
             })
         }
 
@@ -1502,8 +1513,15 @@ mod tests {
     }
 
     fn reader<P>(protocol: P) -> St25r95<RecordingSpi, NoopGpio, FieldOn, Reader, P> {
+        reader_with_spi(RecordingSpi::default(), protocol)
+    }
+
+    fn reader_with_spi<P>(
+        spi: RecordingSpi,
+        protocol: P,
+    ) -> St25r95<RecordingSpi, NoopGpio, FieldOn, Reader, P> {
         St25r95 {
-            spi: RecordingSpi::default(),
+            spi,
             gpio: NoopGpio,
             dac_ref: None,
             dac_guard: 0,
@@ -1516,14 +1534,36 @@ mod tests {
     fn card_emulation<P>(
         protocol: P,
     ) -> St25r95<RecordingSpi, NoopGpio, FieldOn, CardEmulation, P> {
+        card_emulation_with_spi(RecordingSpi::default(), CardEmulation(false), protocol)
+    }
+
+    fn card_emulation_with_spi<P>(
+        spi: RecordingSpi,
+        role: CardEmulation,
+        protocol: P,
+    ) -> St25r95<RecordingSpi, NoopGpio, FieldOn, CardEmulation, P> {
         St25r95 {
-            spi: RecordingSpi::default(),
+            spi,
             gpio: NoopGpio,
             dac_ref: None,
             dac_guard: 0,
             field: PhantomData::<FieldOn>,
-            role: CardEmulation(false),
+            role,
             protocol,
+        }
+    }
+
+    fn unselected_driver(
+        spi: RecordingSpi,
+    ) -> St25r95<RecordingSpi, NoopGpio, FieldOff, NoRole, NoProtocol> {
+        St25r95 {
+            spi,
+            gpio: NoopGpio,
+            dac_ref: None,
+            dac_guard: 0,
+            field: PhantomData::<FieldOff>,
+            role: NoRole,
+            protocol: NoProtocol,
         }
     }
 
@@ -1537,6 +1577,14 @@ mod tests {
         assert_eq!(spi.command, Some(Command::ACFilter));
         assert_eq!(spi.data.as_slice(), data);
         assert!(!spi.sod);
+    }
+
+    fn assert_hw_error<T>(result: Result<T>, expected: St25r95Error) {
+        match result {
+            Err(Error::Hw(actual)) => assert_eq!(actual, expected),
+            Err(error) => panic!("expected hardware error, got {error:?}"),
+            Ok(_) => panic!("expected hardware error, got success"),
+        }
     }
 
     fn timeout_wake() -> u8 {
@@ -1695,6 +1743,146 @@ mod tests {
             ),
             Err(Error::InvalidCascadeLevelFilterCount(4))
         );
+    }
+
+    #[test]
+    pub fn test_expect_data_len_rejects_hardware_status_codes() {
+        for (status, expected) in [
+            (0x63, St25r95Error::EmdSOFerror23),
+            (0x8F, St25r95Error::NoField),
+            (0x82, St25r95Error::InvalidCommandLength),
+            (0x87, St25r95Error::FrameTimeoutOrNoTag),
+            (0x84, St25r95Error::UnknownError(0x84)),
+        ] {
+            let response = ReadResponse::try_from([status, 0x00].as_slice()).unwrap();
+            assert_eq!(response.expect_data_len(0), Err(Error::Hw(expected)));
+        }
+    }
+
+    #[test]
+    pub fn test_send_receive_keeps_raw_hardware_status() {
+        let mut reader = reader_with_spi(RecordingSpi::with_response_code(0x87), Iso14443A);
+
+        let response = reader.send_receive(&[0x26]).unwrap();
+
+        assert_eq!(response.code, 0x87);
+        assert!(response.data.is_empty());
+    }
+
+    #[test]
+    pub fn test_protocol_select_paths_reject_hardware_status() {
+        assert_hw_error(
+            unselected_driver(RecordingSpi::with_response_code(0x82))
+                .protocol_select_iso15693(Default::default()),
+            St25r95Error::InvalidCommandLength,
+        );
+        assert_hw_error(
+            unselected_driver(RecordingSpi::with_response_code(0x82))
+                .protocol_select_iso14443a(Default::default()),
+            St25r95Error::InvalidCommandLength,
+        );
+        assert_hw_error(
+            unselected_driver(RecordingSpi::with_response_code(0x82))
+                .protocol_select_iso14443b(Default::default()),
+            St25r95Error::InvalidCommandLength,
+        );
+        assert_hw_error(
+            unselected_driver(RecordingSpi::with_response_code(0x82))
+                .protocol_select_felica(Default::default()),
+            St25r95Error::InvalidCommandLength,
+        );
+        assert_hw_error(
+            unselected_driver(RecordingSpi::with_response_code(0x82))
+                .protocol_select_ce_iso14443a(Default::default()),
+            St25r95Error::InvalidCommandLength,
+        );
+    }
+
+    #[test]
+    pub fn test_acknowledgement_paths_reject_hardware_status() {
+        assert_hw_error(
+            reader_with_spi(RecordingSpi::with_response_code(0x82), Iso14443A).field_off(),
+            St25r95Error::InvalidCommandLength,
+        );
+
+        let mut reader = reader_with_spi(RecordingSpi::with_response_code(0x82), Iso14443A);
+        assert_hw_error(
+            reader.write_timer_windows(TimerWindow(0x52)),
+            St25r95Error::InvalidCommandLength,
+        );
+
+        let mut card = card_emulation_with_spi(
+            RecordingSpi::with_response_code(0x82),
+            CardEmulation(false),
+            Iso14443A,
+        );
+        assert_hw_error(card.listen(), St25r95Error::InvalidCommandLength);
+        assert!(!card.role.0);
+
+        let mut card = card_emulation_with_spi(
+            RecordingSpi::with_response_code(0x82),
+            CardEmulation(false),
+            Iso14443A,
+        );
+        assert_hw_error(card.send(&[0x01]), St25r95Error::InvalidCommandLength);
+
+        let mut card = card_emulation_with_spi(
+            RecordingSpi::with_response_code(0x82),
+            CardEmulation(false),
+            Iso14443A,
+        );
+        assert_hw_error(
+            card.activate_ac_filter(0x1234, 0x56, [[0x01, 0x02, 0x03, 0x04]]),
+            St25r95Error::InvalidCommandLength,
+        );
+
+        let mut card = card_emulation_with_spi(
+            RecordingSpi::with_response_code(0x82),
+            CardEmulation(false),
+            Iso14443A,
+        );
+        assert_hw_error(
+            card.set_anti_collision_state(AntiColState::Idle),
+            St25r95Error::InvalidCommandLength,
+        );
+
+        let mut card = card_emulation_with_spi(
+            RecordingSpi::with_response_code(0x82),
+            CardEmulation(true),
+            Iso14443A,
+        );
+        assert_hw_error(card.cancel_listen(), St25r95Error::InvalidCommandLength);
+        assert!(card.role.0);
+    }
+
+    #[test]
+    pub fn test_acknowledgement_paths_map_zero_length_hardware_errors() {
+        for (status, expected) in [
+            (0x8F, St25r95Error::NoField),
+            (0x82, St25r95Error::InvalidCommandLength),
+            (0x87, St25r95Error::FrameTimeoutOrNoTag),
+            (0x84, St25r95Error::UnknownError(0x84)),
+        ] {
+            let mut card = card_emulation_with_spi(
+                RecordingSpi::with_response_code(status),
+                CardEmulation(false),
+                Iso14443A,
+            );
+            assert_hw_error(card.listen(), expected);
+            assert!(!card.role.0);
+        }
+    }
+
+    #[test]
+    pub fn test_cancel_listen_consumes_user_stop_while_listening() {
+        let mut card = card_emulation_with_spi(
+            RecordingSpi::with_response_code(0x85),
+            CardEmulation(true),
+            Iso14443A,
+        );
+
+        assert_eq!(card.cancel_listen(), Ok(()));
+        assert!(!card.role.0);
     }
 
     #[test]
