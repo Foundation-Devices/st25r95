@@ -651,20 +651,22 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         let mut data = [0u8; 4];
         data[0] = reg.write_addr();
         data[1] = inc_addr as u8;
-        if reg.has_index() {
+
+        let data_len = if reg.has_index() {
             data[2] = reg.index_confirmation();
-        } else {
-            data[3] = reg.index_confirmation();
-        }
-        let data_len = if let Some(value) = value {
-            if reg.has_index() {
+            if let Some(value) = value {
                 data[3] = value;
+                4
             } else {
-                data[2] = value;
+                3
             }
-            4
         } else {
-            3
+            if let Some(value) = value {
+                data[2] = value;
+                3
+            } else {
+                2
+            }
         };
         self.spi
             .send_command(Command::WrReg, &data[..data_len], false)?;
@@ -1401,6 +1403,42 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingSpi {
+        command: Option<Command>,
+        data: heapless::Vec<u8, 8>,
+        sod: bool,
+    }
+
+    impl St25r95Spi for RecordingSpi {
+        fn poll(&mut self, _flags: PollFlags) -> Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_command(&mut self, cmd: Command, data: &[u8], sod: bool) -> Result<()> {
+            self.command = Some(cmd);
+            self.data.clear();
+            self.data.extend_from_slice(data).unwrap();
+            self.sod = sod;
+            Ok(())
+        }
+
+        fn read_data(&mut self) -> Result<ReadResponse> {
+            Ok(ReadResponse {
+                code: 0,
+                data: heapless::Vec::new(),
+            })
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     struct NoopGpio;
 
     impl St25r95Gpio for NoopGpio {
@@ -1409,6 +1447,38 @@ mod tests {
         fn wait_irq_out_falling_edge(&mut self, _timeout: u32) -> core::result::Result<(), ()> {
             Ok(())
         }
+    }
+
+    fn reader<P>(protocol: P) -> St25r95<RecordingSpi, NoopGpio, FieldOn, Reader, P> {
+        St25r95 {
+            spi: RecordingSpi::default(),
+            gpio: NoopGpio,
+            dac_ref: None,
+            dac_guard: 0,
+            field: PhantomData::<FieldOn>,
+            role: Reader,
+            protocol,
+        }
+    }
+
+    fn card_emulation<P>(
+        protocol: P,
+    ) -> St25r95<RecordingSpi, NoopGpio, FieldOn, CardEmulation, P> {
+        St25r95 {
+            spi: RecordingSpi::default(),
+            gpio: NoopGpio,
+            dac_ref: None,
+            dac_guard: 0,
+            field: PhantomData::<FieldOn>,
+            role: CardEmulation(false),
+            protocol,
+        }
+    }
+
+    fn assert_wr_reg(spi: &RecordingSpi, data: &[u8]) {
+        assert_eq!(spi.command, Some(Command::WrReg));
+        assert_eq!(spi.data.as_slice(), data);
+        assert!(!spi.sod);
     }
 
     #[test]
@@ -1430,6 +1500,28 @@ mod tests {
                 receiver_gain: ReceiverGain::Db34,
             }
         );
+    }
+
+    #[test]
+    pub fn test_register_write_payloads() {
+        let mut iso14443b = reader(Iso14443B);
+        let arc_b = iso14443b.default_arc_b();
+        iso14443b.write_arc_b(arc_b).unwrap();
+        assert_wr_reg(&iso14443b.spi, &[0x68, 0x00, 0x01, 0x20]);
+
+        let mut card = card_emulation(Iso14443A);
+        let acc_a = card.default_acc_a();
+        card.write_acc_a(acc_a).unwrap();
+        assert_wr_reg(&card.spi, &[0x68, 0x00, 0x04, 0x27]);
+
+        let mut iso14443a = reader(Iso14443A);
+        let timer_window = iso14443a.default_timer_window();
+        iso14443a.write_timer_windows(timer_window).unwrap();
+        assert_wr_reg(&iso14443a.spi, &[0x3A, 0x00, 0x52]);
+
+        let mut felica = reader(FeliCa);
+        felica.enable_autodetect_filter().unwrap();
+        assert_wr_reg(&felica.spi, &[0x0A, 0x00, 0x02]);
     }
 
     #[test]
