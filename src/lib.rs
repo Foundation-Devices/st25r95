@@ -657,13 +657,11 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             } else {
                 3
             }
+        } else if let Some(value) = value {
+            data[2] = value;
+            3
         } else {
-            if let Some(value) = value {
-                data[2] = value;
-                3
-            } else {
-                2
-            }
+            2
         };
         self.spi
             .send_command(Command::WrReg, &data[..data_len], false)?;

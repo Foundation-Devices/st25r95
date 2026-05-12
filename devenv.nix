@@ -15,8 +15,14 @@
 
   languages.rust = {
     enable = true;
-    channel = "nightly";
-    version = "2025-06-24";
+    channel = "stable";
+    version = "1.87.0";
+    components = [
+      "rustc"
+      "cargo"
+      "clippy"
+      "rustfmt"
+    ];
     targets = [ "thumbv7em-none-eabi" ];
   };
 
