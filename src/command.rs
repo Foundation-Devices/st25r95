@@ -835,6 +835,7 @@ mod tests {
     pub fn test_ctrl_res_conf() {
         assert_eq!(
             CtrlResConf {
+                field_detect_aux_enabled: false,
                 field_detector_enabled: false,
                 iref_enabled: false,
                 dac_comp_high: false,
@@ -848,6 +849,7 @@ mod tests {
         );
         assert_eq!(
             u16::from(CtrlResConf {
+                field_detect_aux_enabled: false,
                 field_detector_enabled: false,
                 iref_enabled: false,
                 dac_comp_high: false,
@@ -861,6 +863,7 @@ mod tests {
         );
         assert_eq!(
             u16::from(CtrlResConf {
+                field_detect_aux_enabled: false,
                 field_detector_enabled: false,
                 iref_enabled: false,
                 dac_comp_high: false,
@@ -910,6 +913,7 @@ mod tests {
                     timeout: false,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -920,6 +924,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -951,6 +956,7 @@ mod tests {
                     timeout: false,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -961,6 +967,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -992,6 +999,7 @@ mod tests {
                     timeout: true,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -1002,6 +1010,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -1033,6 +1042,7 @@ mod tests {
                     timeout: false,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -1043,6 +1053,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: true,
                     dac_comp_high: false,
@@ -1069,6 +1080,7 @@ mod tests {
                     timeout: true,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: true,
@@ -1079,6 +1091,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: true,
                     dac_comp_high: true,
@@ -1111,6 +1124,7 @@ mod tests {
                     timeout: false,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: false,
@@ -1121,6 +1135,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: true,
                     dac_comp_high: false,
@@ -1153,6 +1168,7 @@ mod tests {
                     timeout: true,
                 },
                 enter_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: false,
                     dac_comp_high: true,
@@ -1163,6 +1179,7 @@ mod tests {
                     sleep_state_enabled: true,
                 },
                 wu_ctrl: CtrlResConf {
+                    field_detect_aux_enabled: false,
                     field_detector_enabled: false,
                     iref_enabled: true,
                     dac_comp_high: true,
