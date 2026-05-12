@@ -1,8 +1,8 @@
 inputs:
   nixpkgs:
-    url: github:cachix/devenv-nixpkgs/rolling
+    url: github:cachix/devenv-nixpkgs/fa7125ea7f1ae5430010a6e071f68375a39bd24c
   rust-overlay:
-    url: github:oxalica/rust-overlay
+    url: github:oxalica/rust-overlay/d8b1b209203665924c81eabf750492530754f27e
     inputs:
       nixpkgs:
         follows: nixpkgs

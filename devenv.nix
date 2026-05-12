@@ -16,6 +16,7 @@
   languages.rust = {
     enable = true;
     channel = "nightly";
+    version = "2025-06-24";
     targets = [ "thumbv7em-none-eabi" ];
   };
 
