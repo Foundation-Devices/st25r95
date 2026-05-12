@@ -765,17 +765,26 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         }
         for &val in [0x80, 0x40, 0x20, 0x10, 0x08, 0x04].iter() {
             if wus.timeout {
-                params.dac_data.high -= val;
+                params.dac_data.high = adjust_calibration_dac_high(params.dac_data.high, -val)?;
             } else if wus.tag_detection {
-                params.dac_data.high += val;
+                params.dac_data.high = adjust_calibration_dac_high(params.dac_data.high, val)?;
             }
             wus = self._idle(params, false)?;
         }
         if wus.timeout {
-            params.dac_data.high -= 0x04;
+            params.dac_data.high = adjust_calibration_dac_high(params.dac_data.high, -0x04)?;
         }
         self.dac_ref = Some(params.dac_data.high);
         Ok(params.dac_data.high)
+    }
+}
+
+fn adjust_calibration_dac_high(dac_high: u8, delta: i16) -> Result<u8> {
+    let next = i16::from(dac_high) + delta;
+    if (0..=i16::from(u8::MAX)).contains(&next) {
+        Ok(next as u8)
+    } else {
+        Err(Error::CalibDacOutOfRange { dac_high, delta })
     }
 }
 
@@ -1439,6 +1448,47 @@ mod tests {
         }
     }
 
+    struct WakeSequenceSpi<const N: usize> {
+        wake_sources: [u8; N],
+        index: usize,
+    }
+
+    impl<const N: usize> WakeSequenceSpi<N> {
+        fn new(wake_sources: [u8; N]) -> Self {
+            Self {
+                wake_sources,
+                index: 0,
+            }
+        }
+    }
+
+    impl<const N: usize> St25r95Spi for WakeSequenceSpi<N> {
+        fn poll(&mut self, _flags: PollFlags) -> Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_command(&mut self, _cmd: Command, _data: &[u8], _sod: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_data(&mut self) -> Result<ReadResponse> {
+            let wake_source = self.wake_sources[self.index];
+            self.index += 1;
+
+            let mut data = heapless::Vec::new();
+            data.push(wake_source).unwrap();
+            Ok(ReadResponse { code: 0, data })
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     struct NoopGpio;
 
     impl St25r95Gpio for NoopGpio {
@@ -1479,6 +1529,42 @@ mod tests {
         assert_eq!(spi.command, Some(Command::WrReg));
         assert_eq!(spi.data.as_slice(), data);
         assert!(!spi.sod);
+    }
+
+    fn timeout_wake() -> u8 {
+        u8::from(WakeUpSource {
+            lfo_freq: LFOFreq::KHz32,
+            ss_low_pulse: false,
+            irq_in_low_pulse: false,
+            field_detection: false,
+            tag_detection: false,
+            timeout: true,
+        })
+    }
+
+    fn tag_detection_wake() -> u8 {
+        u8::from(WakeUpSource {
+            lfo_freq: LFOFreq::KHz32,
+            ss_low_pulse: false,
+            irq_in_low_pulse: false,
+            field_detection: false,
+            tag_detection: true,
+            timeout: false,
+        })
+    }
+
+    fn calibration_reader<const N: usize>(
+        wake_sources: [u8; N],
+    ) -> St25r95<WakeSequenceSpi<N>, NoopGpio, FieldOn, Reader, NoProtocol> {
+        St25r95 {
+            spi: WakeSequenceSpi::new(wake_sources),
+            gpio: NoopGpio,
+            dac_ref: None,
+            dac_guard: 0,
+            field: PhantomData::<FieldOn>,
+            role: Reader,
+            protocol: NoProtocol,
+        }
     }
 
     #[test]
@@ -1522,6 +1608,69 @@ mod tests {
         let mut felica = reader(FeliCa);
         felica.enable_autodetect_filter().unwrap();
         assert_wr_reg(&felica.spi, &[0x0A, 0x00, 0x02]);
+    }
+
+    #[test]
+    pub fn test_calibrate_tag_detector_all_timeout_fails_without_dac_ref() {
+        let mut reader = calibration_reader([timeout_wake()]);
+
+        assert_eq!(
+            reader.calibrate_tag_detector(),
+            Err(Error::CalibTagDetectionFailed)
+        );
+        assert_eq!(reader.dac_ref, None);
+    }
+
+    #[test]
+    pub fn test_calibrate_tag_detector_all_tag_detection_fails_without_dac_ref() {
+        let mut reader = calibration_reader([tag_detection_wake(), tag_detection_wake()]);
+
+        assert_eq!(
+            reader.calibrate_tag_detector(),
+            Err(Error::CalibTimeoutFailed)
+        );
+        assert_eq!(reader.dac_ref, None);
+    }
+
+    #[test]
+    pub fn test_calibrate_tag_detector_boundary_timeout_fails_without_updating_dac_ref() {
+        let mut reader = calibration_reader([
+            tag_detection_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+        ]);
+        reader.dac_ref = Some(0x55);
+
+        assert_eq!(
+            reader.calibrate_tag_detector(),
+            Err(Error::CalibDacOutOfRange {
+                dac_high: 0x00,
+                delta: -0x04,
+            })
+        );
+        assert_eq!(reader.dac_ref, Some(0x55));
+    }
+
+    #[test]
+    pub fn test_calibrate_tag_detector_boundary_zero_succeeds() {
+        let mut reader = calibration_reader([
+            tag_detection_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            timeout_wake(),
+            tag_detection_wake(),
+        ]);
+
+        assert_eq!(reader.calibrate_tag_detector(), Ok(0x00));
+        assert_eq!(reader.dac_ref, Some(0x00));
     }
 
     #[test]

@@ -144,6 +144,10 @@ pub enum Error {
     // Tag Detector Calibration
     CalibTagDetectionFailed, // Expected Tag Detection failed
     CalibTimeoutFailed,      // Expected Timeout failed
+    CalibDacOutOfRange {
+        dac_high: u8,
+        delta: i16,
+    },
 
     InvalidAntiColState(u8),
     InvalidCascadeLevelFilterCount(usize),
