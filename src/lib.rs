@@ -1067,22 +1067,24 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
         sak: SAK,
         cascade_level_filter: impl IntoIterator<Item = UID>,
     ) -> Result<()> {
-        let mut clf_len = 0;
+        let mut uid_count = 0;
         let mut data = [0u8; 15];
         data[0..2].copy_from_slice(&atqa.to_le_bytes());
         data[2] = sak;
         for uid in cascade_level_filter.into_iter() {
-            if clf_len > 3 {
-                return Err(Error::InvalidCascadeLevelFilterCount(clf_len));
+            if uid_count >= 3 {
+                return Err(Error::InvalidCascadeLevelFilterCount(uid_count + 1));
             }
-            data[3 + clf_len..3 + clf_len + uid.len()].copy_from_slice(uid.as_slice());
-            clf_len += 1;
+            let uid_offset = 3 + uid_count * uid.len();
+            data[uid_offset..uid_offset + uid.len()].copy_from_slice(uid.as_slice());
+            uid_count += 1;
         }
-        if clf_len == 0 {
-            return Err(Error::InvalidCascadeLevelFilterCount(clf_len));
+        if uid_count == 0 {
+            return Err(Error::InvalidCascadeLevelFilterCount(uid_count));
         }
+        let data_len = 3 + uid_count * core::mem::size_of::<UID>();
         self.spi
-            .send_command(Command::ACFilter, &data[..3 + clf_len], false)?;
+            .send_command(Command::ACFilter, &data[..data_len], false)?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -1415,7 +1417,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSpi {
         command: Option<Command>,
-        data: heapless::Vec<u8, 8>,
+        data: heapless::Vec<u8, 16>,
         sod: bool,
     }
 
@@ -1531,6 +1533,12 @@ mod tests {
         assert!(!spi.sod);
     }
 
+    fn assert_ac_filter(spi: &RecordingSpi, data: &[u8]) {
+        assert_eq!(spi.command, Some(Command::ACFilter));
+        assert_eq!(spi.data.as_slice(), data);
+        assert!(!spi.sod);
+    }
+
     fn timeout_wake() -> u8 {
         u8::from(WakeUpSource {
             lfo_freq: LFOFreq::KHz32,
@@ -1608,6 +1616,85 @@ mod tests {
         let mut felica = reader(FeliCa);
         felica.enable_autodetect_filter().unwrap();
         assert_wr_reg(&felica.spi, &[0x0A, 0x00, 0x02]);
+    }
+
+    #[test]
+    pub fn test_activate_ac_filter_one_uid_payload() {
+        let mut card = card_emulation(Iso14443A);
+
+        card.activate_ac_filter(0x1234, 0x56, [[0x01, 0x02, 0x03, 0x04]])
+            .unwrap();
+
+        assert_ac_filter(&card.spi, &[0x34, 0x12, 0x56, 0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    pub fn test_activate_ac_filter_two_uid_payload() {
+        let mut card = card_emulation(Iso14443A);
+
+        card.activate_ac_filter(
+            0x1234,
+            0x56,
+            [[0x01, 0x02, 0x03, 0x04], [0x05, 0x06, 0x07, 0x08]],
+        )
+        .unwrap();
+
+        assert_ac_filter(
+            &card.spi,
+            &[
+                0x34, 0x12, 0x56, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            ],
+        );
+    }
+
+    #[test]
+    pub fn test_activate_ac_filter_three_uid_payload() {
+        let mut card = card_emulation(Iso14443A);
+
+        card.activate_ac_filter(
+            0x1234,
+            0x56,
+            [
+                [0x01, 0x02, 0x03, 0x04],
+                [0x05, 0x06, 0x07, 0x08],
+                [0x09, 0x0A, 0x0B, 0x0C],
+            ],
+        )
+        .unwrap();
+
+        assert_ac_filter(
+            &card.spi,
+            &[
+                0x34, 0x12, 0x56, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+                0x0C,
+            ],
+        );
+    }
+
+    #[test]
+    pub fn test_activate_ac_filter_invalid_uid_counts() {
+        let mut card = card_emulation(Iso14443A);
+        let no_uids: [UID; 0] = [];
+
+        assert_eq!(
+            card.activate_ac_filter(0x1234, 0x56, no_uids),
+            Err(Error::InvalidCascadeLevelFilterCount(0))
+        );
+
+        let mut card = card_emulation(Iso14443A);
+        assert_eq!(
+            card.activate_ac_filter(
+                0x1234,
+                0x56,
+                [
+                    [0x01, 0x02, 0x03, 0x04],
+                    [0x05, 0x06, 0x07, 0x08],
+                    [0x09, 0x0A, 0x0B, 0x0C],
+                    [0x0D, 0x0E, 0x0F, 0x10],
+                ],
+            ),
+            Err(Error::InvalidCascadeLevelFilterCount(4))
+        );
     }
 
     #[test]
