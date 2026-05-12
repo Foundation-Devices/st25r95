@@ -823,14 +823,13 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso15693> {
 
     pub fn default_arc_b(&self) -> ArcB {
         // See Table 35
-        self.new_arc_b(
-            match self.protocol.0 {
+        ArcB {
+            modulation_index: match self.protocol.0 {
                 Modulation::Percent10 => ModulationIndex::Percent33,
                 Modulation::Percent100 => ModulationIndex::Percent95,
             },
-            ReceiverGain::Db27,
-        )
-        .unwrap()
+            receiver_gain: ReceiverGain::Db27,
+        }
     }
 }
 
@@ -853,8 +852,10 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso14443A> {
 
     pub fn default_arc_b(&self) -> ArcB {
         // See Table 35
-        self.new_arc_b(ModulationIndex::Percent95, ReceiverGain::Db8)
-            .unwrap()
+        ArcB {
+            modulation_index: ModulationIndex::Percent95,
+            receiver_gain: ReceiverGain::Db8,
+        }
     }
 
     pub fn new_timer_window(&self, timer_w: u8) -> Result<TimerWindow> {
@@ -871,12 +872,12 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso14443A> {
 
     pub fn default_timer_window(&self) -> TimerWindow {
         // See §5.11.2
-        self.new_timer_window(0x52).unwrap()
+        TimerWindow(0x52)
     }
 
     pub fn recommended_timer_window(&self) -> TimerWindow {
         // See §5.11.2
-        self.new_timer_window(0x56).unwrap()
+        TimerWindow(0x56)
     }
 
     /// To improve ST25R95 demodulation when communicating with ISO/IEC 14443 Type A tags,
@@ -915,8 +916,10 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, Iso14443B> {
 
     pub fn default_arc_b(&self) -> ArcB {
         // See Table 35
-        self.new_arc_b(ModulationIndex::Percent17, ReceiverGain::Db34)
-            .unwrap()
+        ArcB {
+            modulation_index: ModulationIndex::Percent17,
+            receiver_gain: ReceiverGain::Db34,
+        }
     }
 }
 
@@ -946,8 +949,10 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, Reader, FeliCa> {
 
     pub fn default_arc_b(&self) -> ArcB {
         // See Table 35
-        self.new_arc_b(ModulationIndex::Percent33, ReceiverGain::Db34)
-            .unwrap()
+        ArcB {
+            modulation_index: ModulationIndex::Percent17,
+            receiver_gain: ReceiverGain::Db34,
+        }
     }
 
     /// To improve ST25R95 reception when communicating with FeliCa™ tags, it is possible
@@ -1017,11 +1022,10 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     }
 
     pub fn default_acc_a(&self) -> AccA {
-        self.new_acc_a(
-            LoadModulationIndex::default(),
-            DemodulatorSensitivity::Percent100,
-        )
-        .unwrap()
+        AccA {
+            load_modulation_index: LoadModulationIndex::default(),
+            demodulator_sensitivity: DemodulatorSensitivity::Percent100,
+        }
     }
 
     pub fn recommended_acc_a(&self) -> AccA {
@@ -1369,6 +1373,64 @@ impl TryFrom<&[u8]> for ReadResponse {
 #[cfg(test)]
 mod tests {
     use {super::*, core::ops::Range};
+
+    struct NoopSpi;
+
+    impl St25r95Spi for NoopSpi {
+        fn poll(&mut self, _flags: PollFlags) -> Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_command(&mut self, _cmd: Command, _data: &[u8], _sod: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_data(&mut self) -> Result<ReadResponse> {
+            Ok(ReadResponse {
+                code: 0,
+                data: heapless::Vec::new(),
+            })
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopGpio;
+
+    impl St25r95Gpio for NoopGpio {
+        fn irq_in_pulse_low(&mut self) {}
+
+        fn wait_irq_out_falling_edge(&mut self, _timeout: u32) -> core::result::Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    pub fn test_felica_default_arc_b() {
+        let reader = St25r95 {
+            spi: NoopSpi,
+            gpio: NoopGpio,
+            dac_ref: None,
+            dac_guard: 0,
+            field: PhantomData::<FieldOn>,
+            role: Reader,
+            protocol: FeliCa,
+        };
+
+        assert_eq!(
+            reader.default_arc_b(),
+            ArcB {
+                modulation_index: ModulationIndex::Percent17,
+                receiver_gain: ReceiverGain::Db34,
+            }
+        );
+    }
 
     #[test]
     pub fn test_len_decode() {
