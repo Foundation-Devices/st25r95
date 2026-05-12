@@ -9,7 +9,7 @@ keywords = ["no-std", "nfc"]
 license = "GPL-3.0-or-later"
 name = "st25r95"
 repository = "https://github.com/Foundation-Devices/st25r95"
-rust-version = "1.86.0"
+rust-version = "1.87.0"
 version = "0.4.0"
 
 [dependencies]
