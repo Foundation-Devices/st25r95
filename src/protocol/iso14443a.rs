@@ -398,6 +398,7 @@ impl From<TransmissionFlags> for u8 {
 /// TODO The collision information is only present for a bit rate of 106 kbps for
 /// transmission and reception. When other bit rates are selected, the two additional
 /// bytes are not transmitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceptionFlags {
     collision_detected: bool,
     crc_error: bool,
@@ -418,13 +419,28 @@ impl TryFrom<[u8; 3]> for ReceptionFlags {
     type Error = ();
 
     fn try_from(data: [u8; 3]) -> Result<Self, Self::Error> {
+        const STATUS_RESERVED_MASK: u8 = 0b0100_0000;
+        const COLLISION_BIT_INDEX_MASK: u8 = 0b0000_1111;
+        const COLLISION_BIT_INDEX_RESERVED_MASK: u8 = 0b1111_0000;
+        const MAX_COLLISION_BIT_INDEX: u8 = 8;
+
         let collision_detected = data[0] & 0b1000_0000 != 0;
         let crc_error = data[0] & 0b0010_0000 != 0;
         let parity_error = data[0] & 0b0001_0000 != 0;
         let number_of_significant_bits_in_first_byte = data[0] & 0b0000_1111;
         let index_of_the_first_byte_where_collision_was_detected = data[1];
-        let index_of_the_first_bit_where_collision_was_detected = data[2] & 0b000_1111;
-        if data[0] & 0b1111_1101 == 0 && data[2] & 0b1111_0000 == 0 {
+        let index_of_the_first_bit_where_collision_was_detected =
+            data[2] & COLLISION_BIT_INDEX_MASK;
+
+        let status_reserved_bits_clear = data[0] & STATUS_RESERVED_MASK == 0;
+        let collision_bit_reserved_bits_clear = data[2] & COLLISION_BIT_INDEX_RESERVED_MASK == 0;
+        let collision_bit_index_valid =
+            index_of_the_first_bit_where_collision_was_detected <= MAX_COLLISION_BIT_INDEX;
+
+        if status_reserved_bits_clear
+            && collision_bit_reserved_bits_clear
+            && collision_bit_index_valid
+        {
             Ok(ReceptionFlags {
                 collision_detected,
                 crc_error,
@@ -449,6 +465,104 @@ impl From<ReceptionFlags> for [u8; 3] {
             lbf.index_of_the_first_byte_where_collision_was_detected,
             lbf.index_of_the_first_bit_where_collision_was_detected,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_reception_flags_round_trip(data: [u8; 3]) -> ReceptionFlags {
+        let flags = ReceptionFlags::try_from(data).unwrap();
+        assert_eq!(<[u8; 3]>::from(flags), data);
+        flags
+    }
+
+    #[test]
+    fn test_reception_flags_no_flags() {
+        let flags = assert_reception_flags_round_trip([0x00, 0x00, 0x00]);
+
+        assert!(!flags.collision_detected);
+        assert!(!flags.crc_error);
+        assert!(!flags.parity_error);
+        assert_eq!(flags.number_of_significant_bits_in_first_byte, 0);
+        assert_eq!(
+            flags.index_of_the_first_byte_where_collision_was_detected,
+            0
+        );
+        assert_eq!(flags.index_of_the_first_bit_where_collision_was_detected, 0);
+    }
+
+    #[test]
+    fn test_reception_flags_collision() {
+        let flags = assert_reception_flags_round_trip([0x80, 0x02, 0x08]);
+
+        assert!(flags.collision_detected);
+        assert!(!flags.crc_error);
+        assert!(!flags.parity_error);
+        assert_eq!(flags.number_of_significant_bits_in_first_byte, 0);
+        assert_eq!(
+            flags.index_of_the_first_byte_where_collision_was_detected,
+            2
+        );
+        assert_eq!(flags.index_of_the_first_bit_where_collision_was_detected, 8);
+    }
+
+    #[test]
+    fn test_reception_flags_crc_error() {
+        let flags = assert_reception_flags_round_trip([0x28, 0x00, 0x00]);
+
+        assert!(!flags.collision_detected);
+        assert!(flags.crc_error);
+        assert!(!flags.parity_error);
+        assert_eq!(flags.number_of_significant_bits_in_first_byte, 8);
+    }
+
+    #[test]
+    fn test_reception_flags_parity_error() {
+        let flags = assert_reception_flags_round_trip([0x10, 0x00, 0x00]);
+
+        assert!(!flags.collision_detected);
+        assert!(!flags.crc_error);
+        assert!(flags.parity_error);
+    }
+
+    #[test]
+    fn test_reception_flags_significant_bits() {
+        for significant_bits in 0..=0x0F {
+            let flags = assert_reception_flags_round_trip([significant_bits, 0x00, 0x00]);
+            assert_eq!(
+                flags.number_of_significant_bits_in_first_byte,
+                significant_bits
+            );
+        }
+    }
+
+    #[test]
+    fn test_reception_flags_combined_datasheet_collision_example() {
+        let flags = assert_reception_flags_round_trip([0xB8, 0x02, 0x04]);
+
+        assert!(flags.collision_detected);
+        assert!(flags.crc_error);
+        assert!(flags.parity_error);
+        assert_eq!(flags.number_of_significant_bits_in_first_byte, 8);
+        assert_eq!(
+            flags.index_of_the_first_byte_where_collision_was_detected,
+            2
+        );
+        assert_eq!(flags.index_of_the_first_bit_where_collision_was_detected, 4);
+    }
+
+    #[test]
+    fn test_reception_flags_reject_reserved_bits() {
+        assert!(ReceptionFlags::try_from([0x40, 0x00, 0x00]).is_err());
+        assert!(ReceptionFlags::try_from([0x00, 0x00, 0x10]).is_err());
+    }
+
+    #[test]
+    fn test_reception_flags_reject_invalid_collision_bit_index() {
+        assert!(ReceptionFlags::try_from([0x80, 0x00, 0x08]).is_ok());
+        assert!(ReceptionFlags::try_from([0x80, 0x00, 0x09]).is_err());
     }
 }
 
