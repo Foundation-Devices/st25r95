@@ -26,14 +26,22 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use st25r95::{
+//! #     iso15693,
+//! #     mock::{MockGpio, MockSpi},
+//! #     St25r95,
+//! # };
+//! # let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 //! // Select ISO14443A reader mode with default parameters
-//! let mut reader = nfc.protocol_select_iso14443a(Default::default())?;
+//! let reader = nfc.protocol_select_iso14443a(Default::default())?;
 //!
 //! // Select ISO15693 with specific modulation
-//! let params = iso15693::reader::Parameters::new()
-//!     .with_modulation(Modulation::Percent10);
-//! let mut reader = nfc.protocol_select_iso15693(params)?;
+//! let params =
+//!     iso15693::reader::Parameters::default().modulation(iso15693::reader::Modulation::Percent10);
+//! let reader = reader.protocol_select_iso15693(params)?;
+//! # let _ = reader;
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 
 pub mod felica;

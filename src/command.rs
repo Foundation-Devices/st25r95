@@ -211,22 +211,29 @@ impl TryFrom<u8> for Command {
 ///
 /// ## Usage Examples
 ///
-/// ```rust,ignore
-/// // Wait 100ms for field appearance
+/// ```rust
+/// # use st25r95::{
+/// #     mock::{MockGpio, MockSpi},
+/// #     St25r95,
+/// #     WaitForField,
+/// # };
+/// # let mut nfc = St25r95::new(MockSpi::default(), MockGpio)?;
+/// // Wait for field appearance
 /// let wff = WaitForField {
 ///     apparance: true,
-///     presc: 15,   // (15 + 1) * (13 + 1) / 13.56 ≈ 16.5ms
+///     presc: 15, // (15 + 1) * (13 + 1) / 13.56
 ///     timer: 13,
 /// };
 /// nfc.poll_field(Some(wff))?;
 ///
-/// // Wait 1 second for field disappearance
+/// // Wait longer for field disappearance
 /// let wff = WaitForField {
 ///     apparance: false,
-///     presc: 200,  // (200 + 1) * (67 + 1) / 13.56 ≈ 1.0s
+///     presc: 200, // (200 + 1) * (67 + 1) / 13.56
 ///     timer: 67,
 /// };
 /// nfc.poll_field(Some(wff))?;
+/// # Ok::<(), st25r95::Error>(())
 /// ```
 #[derive(Debug, Copy, Clone, Default)]
 pub struct WaitForField {
@@ -250,9 +257,14 @@ impl WaitForField {
     /// ```
     ///
     /// ## Examples
-    /// ```rust,ignore
-    /// let wff = WaitForField { apparance: true, presc: 15, timer: 13 };
-    /// assert_eq!(wff.us(), 16523.0); // ~16.5ms
+    /// ```rust
+    /// # use st25r95::WaitForField;
+    /// let wff = WaitForField {
+    ///     apparance: true,
+    ///     presc: 15,
+    ///     timer: 13,
+    /// };
+    /// assert!((wff.us() - 16.52).abs() < 0.01);
     /// ```
     pub fn us(self) -> f32 {
         (((self.presc) as f32 + 1f32) * ((self.timer as f32) + 1f32)) / 13.56f32
@@ -323,7 +335,8 @@ impl LFOFreq {
     /// ```
     ///
     /// ## Examples
-    /// ```rust,ignore
+    /// ```rust
+    /// # use st25r95::LFOFreq;
     /// assert_eq!(LFOFreq::KHz32.period_us(), 31.25);
     /// assert_eq!(LFOFreq::KHz4.period_us(), 250.0);
     /// ```
@@ -347,7 +360,8 @@ impl LFOFreq {
     /// ```
     ///
     /// ## Examples
-    /// ```rust,ignore
+    /// ```rust
+    /// # use st25r95::LFOFreq;
     /// assert_eq!(LFOFreq::KHz32.t_ref_ms(), 8);
     /// assert_eq!(LFOFreq::KHz4.t_ref_ms(), 64);
     /// ```
@@ -395,19 +409,19 @@ impl TryFrom<u8> for LFOFreq {
 ///
 /// **Tag detection requires calibration** using `calibrate_tag_detector()`:
 ///
-/// ```rust,ignore
-/// // Calibrate first
-/// let dac_ref = nfc.calibrate_tag_detector()?;
-///
-/// // Then use tag detection
+/// ```rust
+/// # use st25r95::{IdleParams, WakeUpSource};
+/// // Calibrate first with `St25r95::calibrate_tag_detector`, then use tag
+/// // detection as a wake-up source.
 /// let params = IdleParams {
 ///     wus: WakeUpSource {
 ///         tag_detection: true,
-///         timeout: true,  // Always enable timeout with tag detection
+///         timeout: true, // Always enable timeout with tag detection
 ///         ..Default::default()
 ///     },
 ///     ..Default::default()
 /// };
+/// assert!(params.wus.tag_detection);
 /// ```
 ///
 /// ## Power Consumption Impact
@@ -420,25 +434,27 @@ impl TryFrom<u8> for LFOFreq {
 ///
 /// ## Recommended Configurations
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use st25r95::WakeUpSource;
 /// // Host-controlled wake-up (lowest power)
-/// WakeUpSource {
+/// let host = WakeUpSource {
 ///     irq_in_low_pulse: true,
 ///     ..Default::default()
-/// }
+/// };
 ///
 /// // Field detection for reader collision avoidance
-/// WakeUpSource {
+/// let field = WakeUpSource {
 ///     field_detection: true,
 ///     ..Default::default()
-/// }
+/// };
 ///
 /// // Tag detection with timeout failsafe
-/// WakeUpSource {
+/// let tag = WakeUpSource {
 ///     tag_detection: true,
 ///     timeout: true,
 ///     ..Default::default()
-/// }
+/// };
+/// assert!(host.irq_in_low_pulse && field.field_detection && tag.tag_detection);
 /// ```
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct WakeUpSource {
@@ -621,8 +637,15 @@ pub struct DacData {
 ///
 /// ## Usage Examples
 ///
-/// ```rust,ignore
-/// // Simple idle with IRQ_IN wake-up
+/// ```rust
+/// # use st25r95::{
+/// #     mock::{MockGpio, MockSpi},
+/// #     IdleParams,
+/// #     St25r95,
+/// #     WakeUpSource,
+/// # };
+/// # let mut nfc = St25r95::new(MockSpi::default(), MockGpio)?;
+/// // Simple idle with IRQ_IN wake-up, waiting up to 5 s for the host pulse
 /// let params = IdleParams {
 ///     wus: WakeUpSource {
 ///         irq_in_low_pulse: true,
@@ -630,19 +653,21 @@ pub struct DacData {
 ///     },
 ///     ..Default::default()
 /// };
-/// let wake_source = nfc.idle(params)?;
+/// let wake_source = nfc.idle(params, 5_000)?;
 ///
-/// // Tag detection mode (after calibration)
+/// // Tag detection mode, which needs a prior `calibrate_tag_detector`
 /// let params = IdleParams {
 ///     wus: WakeUpSource {
 ///         tag_detection: true,
 ///         timeout: true,
 ///         ..Default::default()
 ///     },
-///     wu_period: 0x20,  // Detection period
-///     max_sleep: 10,    // Max trials before timeout
+///     wu_period: 0x20, // Detection period
+///     max_sleep: 10,   // Max trials before timeout
 ///     ..Default::default()
 /// };
+/// # let _ = (wake_source, params);
+/// # Ok::<(), st25r95::Error>(())
 /// ```
 #[derive(Debug, Copy, Clone)]
 pub struct IdleParams {

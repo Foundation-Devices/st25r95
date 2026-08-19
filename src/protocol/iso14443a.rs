@@ -38,18 +38,26 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use st25r95::{
+//! #     iso14443a,
+//! #     mock::{MockGpio, MockSpi},
+//! #     St25r95,
+//! # };
+//! # let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 //! // Reader mode with default settings
 //! let mut reader = nfc.protocol_select_iso14443a(Default::default())?;
 //!
 //! // Send REQA command to detect Type A cards
 //! let response = reader.send_receive(&[0x26])?;
 //!
-//! // Configure optimized parameters for high-speed communication
-//! let params = iso14443a::reader::Parameters::new()
+//! // Re-select with optimized parameters for high-speed communication
+//! let params = iso14443a::reader::Parameters::default()
 //!     .tx_data_rate(iso14443a::reader::DataRate::Kbps424)
 //!     .rx_data_rate(iso14443a::reader::DataRate::Kbps424);
-//! let mut reader = nfc.protocol_select_iso14443a(params)?;
+//! let mut reader = reader.protocol_select_iso14443a(params)?;
+//! # let _ = (response, reader);
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 
 pub mod reader {

@@ -67,19 +67,27 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use st25r95::{
+//! #     felica,
+//! #     mock::{MockGpio, MockSpi},
+//! #     St25r95,
+//! # };
+//! # let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 //! // Reader mode with default settings
 //! let mut reader = nfc.protocol_select_felica(Default::default())?;
 //!
 //! // Polling command to detect FeliCa cards
-//! let polling = [0x00, 0xFF, 0xFF, 0x01, 0x00]; // System code: FFFE (wildcard)
+//! let polling = [0x00, 0xFF, 0xFF, 0x01, 0x00]; // System code: FFFF (wildcard)
 //! let response = reader.send_receive(&polling)?;
 //!
-//! // Configure for high-speed transactions
-//! let params = felica::reader::Parameters::new()
+//! // Configure for high-speed transactions; leave the CRC to FeliCa itself
+//! let params = felica::reader::Parameters::default()
 //!     .tx_data_rate(felica::reader::DataRate::Kbps424)
-//!     .rx_data_rate(felica::reader::DataRate::Kbps424)
-//!     .with_crc(false); // FeliCa handles its own CRC
+//!     .rx_data_rate(felica::reader::DataRate::Kbps424);
+//! let mut reader = reader.protocol_select_felica(params)?;
+//! # let _ = (response, reader);
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 
 pub mod reader {

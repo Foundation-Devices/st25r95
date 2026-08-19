@@ -50,17 +50,26 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use st25r95::{
+//! #     mock::{MockGpio, MockSpi},
+//! #     ModulationIndex,
+//! #     ReceiverGain,
+//! #     St25r95,
+//! # };
+//! # let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
+//! # let mut reader = nfc.protocol_select_felica(Default::default())?;
 //! // Use protocol-specific default configuration
 //! let arc_b = reader.default_arc_b();
 //! reader.write_arc_b(arc_b)?;
 //!
 //! // Custom configuration for specific environment
 //! let arc_b = reader.new_arc_b(
-//!     ModulationIndex::Percent17,  // Moderate modulation
-//!     ReceiverGain::Db20           // Reduced gain for noisy environment
+//!     ModulationIndex::Percent17, // Moderate modulation
+//!     ReceiverGain::Db20,         // Reduced gain for noisy environment
 //! )?;
 //! reader.write_arc_b(arc_b)?;
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 
 use {
@@ -262,8 +271,11 @@ impl TryFrom<u8> for ReceiverGain {
 /// can be overwritten using the WriteRegister command.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ArcB {
-    pub(crate) modulation_index: ModulationIndex,
-    pub(crate) receiver_gain: ReceiverGain,
+    /// Modulation index used when transmitting
+    pub modulation_index: ModulationIndex,
+
+    /// Gain applied on reception
+    pub receiver_gain: ReceiverGain,
 }
 
 impl Register for ArcB {

@@ -12,15 +12,16 @@
 - `cargo test -- --exact <test_name>` - Run single test exactly matching name
 
 ### Linting & Formatting
-- `cargo clippy` - Run clippy linter (requires nightly toolchain)
-- `cargo fmt` - Format code with rustfmt
+- `cargo clippy -- -D warnings` - Run clippy linter (stable toolchain)
+- `cargo +nightly-2025-06-24 fmt` - Format code with rustfmt (unstable options)
 - `cargo sort` - Sort imports (cargo-sort tool required)
 
 ## Code Style Guidelines
 
 ### Rust Version & Toolchain
-- Uses nightly Rust 2025-06-24
-- Target: armv7a-none-eabi for embedded builds
+- Builds, tests and clippy run on stable 1.87.0 (the manifest MSRV)
+- `cargo fmt` needs nightly-2025-06-24: rustfmt.toml uses unstable options
+- Target: thumbv7em-none-eabi for embedded builds
 - Components: rustfmt, clippy, rustc
 
 ### Formatting (rustfmt.toml)
@@ -70,6 +71,6 @@
 
 ### Testing
 - Unit tests in same files as implementation
-- Integration tests for protocol interactions
-- Mock SPI interface for testing
+- Every README and rustdoc example is a doctest and must compile and pass
+- `st25r95::mock` provides the SPI and GPIO implementations examples use
 - Test data validation and error conditions

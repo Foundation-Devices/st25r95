@@ -18,30 +18,60 @@ use crate::{Command, PollFlags, ReadResponse, Result, ECHO_RESPONSE_MAX_LEN};
 ///
 /// ## Example Implementation
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use st25r95::{
+/// #     Command,
+/// #     PollFlags,
+/// #     ReadResponse,
+/// #     Result,
+/// #     St25r95Spi,
+/// #     ECHO_BYTE,
+/// #     ECHO_RESPONSE_MAX_LEN,
+/// # };
 /// struct MySpi {
-///     spi: embedded_hal::spi::Spi<SPI, ...>,
-///     cs: embedded_hal::digital::v2::OutputPin<CS>,
+///     // SPI peripheral and chip-select pin
 /// }
 ///
 /// impl St25r95Spi for MySpi {
 ///     fn poll(&mut self, flags: PollFlags) -> Result<()> {
-///         // Assert CS
-///         // Send polling command
-///         // Deassert CS
-///         // Return success if flags are present, error on timeout
+///         // Assert CS, send the poll control byte, wait until the requested
+///         // flags are set, deassert CS. Time out with `Error::PollTimeout`.
+///         let _ = flags;
+///         Ok(())
+///     }
+///
+///     fn reset(&mut self) -> Result<()> {
+///         // Assert CS, send the reset control byte, deassert CS
+///         Ok(())
 ///     }
 ///
 ///     fn send_command(&mut self, cmd: Command, data: &[u8], sod: bool) -> Result<()> {
-///         // Assert CS
-///         // Send control byte
-///         // Send command byte
-///         // Send data length
-///         // Send data bytes
-///         // Deassert CS
+///         // Assert CS, send the control byte, the command byte, the one-byte
+///         // data length and the payload, then deassert CS
+///         let _ = (cmd, data, sod);
+///         Ok(())
 ///     }
 ///
-///     // ... implement other methods
+///     fn read_data(&mut self) -> Result<ReadResponse> {
+///         // Assert CS, send the read control byte, clock out the status and
+///         // length bytes followed by the payload, deassert CS, then let
+///         // `ReadResponse::try_from` validate the frame
+///         ReadResponse::try_from([0x00, 0x00].as_slice())
+///     }
+///
+///     fn read_echo(&mut self, buf: &mut [u8; ECHO_RESPONSE_MAX_LEN]) -> Result<usize> {
+///         // Assert CS, send the read control byte, clock out the Echo byte
+///         // and the frame that follows it when leaving Listen mode, then
+///         // deassert CS
+///         buf[0] = ECHO_BYTE;
+///         Ok(1)
+///     }
+///
+///     fn flush(&mut self) -> Result<()> {
+///         // Drain whatever the chip is still holding, so the next response
+///         // cannot be mistaken for a stale one
+///         Ok(())
+///     }
 /// }
 /// ```
 pub trait St25r95Spi {

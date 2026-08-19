@@ -39,20 +39,25 @@
 //!
 //! ## Basic Usage
 //!
-//! ```rust,ignore
-//! use st25r95::{St25r95, St25r95Spi, St25r95Gpio};
+//! ```rust
+//! use st25r95::{
+//!     mock::{MockGpio, MockSpi},
+//!     St25r95,
+//! };
 //!
-//! // Initialize the driver
-//! let mut nfc = St25r95::new(spi_interface, gpio_interface)?;
+//! // Initialize the driver with your own `St25r95Spi` and `St25r95Gpio`
+//! // implementations; the mocks stand in for hardware here.
+//! let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 //!
-//! // Select ISO14443A reader mode
-//! let mut nfc = nfc.protocol_select_iso14443a(Default::default())?;
+//! // Select ISO14443A reader mode, which turns the RF field on
+//! let mut reader = nfc.protocol_select_iso14443a(Default::default())?;
 //!
 //! // Send a command to a tag and receive the response
-//! let response = nfc.send_receive(&[0x26])?; // REQA command
+//! let response = reader.send_receive(&[0x26])?; // REQA command
 //!
 //! // Turn off the RF field
-//! let nfc = nfc.field_off()?;
+//! let _nfc = reader.field_off()?;
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 //!
 //! ## Hardware Requirements
@@ -87,13 +92,14 @@ mod command;
 mod control;
 mod error;
 mod gpio;
+pub mod mock;
 mod protocol;
 mod register;
 mod spi;
 
 pub use {
     crate::{
-        command::{Command, CtrlResConf, DacData, IdleParams, LFOFreq, WakeUpSource},
+        command::{Command, CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
         control::{Control, PollFlags},
         protocol::*,
         register::{
@@ -109,7 +115,6 @@ use {
     acc_a::{AccA, DemodulatorSensitivity, LoadModulationIndex},
     arc_b::ArcB,
     auto_detect_filter::AutoDetectFilter,
-    command::WaitForField,
     core::{fmt::Debug, marker::PhantomData, str::from_utf8},
     iso14443a::{
         card_emulation::{AntiColState, Listen},
@@ -199,7 +204,10 @@ pub struct NoRole;
 /// - Single and multiple card anticollision
 /// - Read/write operations on 15693 tags
 /// - Inventory commands for tag detection
-#[derive(Debug)]
+//
+// `Default` is required by the reader methods shared with the other
+// protocols, such as `send_receive` and `field_off`.
+#[derive(Debug, Default)]
 pub struct Iso15693(Modulation);
 
 /// Marker type for ISO/IEC 14443 Type A protocol
@@ -344,23 +352,32 @@ fn host_timeout_ms(device_timeout_us: Option<f32>) -> u32 {
 ///
 /// ## Examples
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use st25r95::{
+/// #     mock::{MockGpio, MockSpi},
+/// #     St25r95,
+/// # };
 /// // Create new driver instance
-/// let nfc = St25r95::new(spi, gpio)?;
+/// let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 ///
-/// // Select ISO14443A reader mode  
+/// // Select ISO14443A reader mode
 /// let mut reader = nfc.protocol_select_iso14443a(Default::default())?;
 ///
 /// // Send REQA command to detect cards
 /// let response = reader.send_receive(&[0x26])?;
 ///
 /// // Turn off field when done
-/// let nfc = reader.field_off()?;
+/// let _nfc = reader.field_off()?;
+/// # Ok::<(), st25r95::Error>(())
 /// ```
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use st25r95::{
+/// #     mock::{MockGpio, MockSpi},
+/// #     St25r95,
+/// # };
 /// // Card emulation example
-/// let nfc = St25r95::new(spi, gpio)?;
+/// let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 ///
 /// // Select card emulation mode
 /// let mut card = nfc.protocol_select_ce_iso14443a(Default::default())?;
@@ -368,10 +385,13 @@ fn host_timeout_ms(device_timeout_us: Option<f32>) -> u32 {
 /// // Enter listening mode
 /// card.listen()?;
 ///
-/// // Wait for reader commands
-/// let command = card.receive()?;
-/// // Process command and send response...
+/// // Wait up to a second for a reader command
+/// let command = card.receive(1_000)?;
+///
+/// // Process the command, then answer the reader
+/// let response_data = [0x04, 0x00];
 /// card.send(&response_data)?;
+/// # Ok::<(), st25r95::Error>(())
 /// ```
 pub struct St25r95<S, G, F, R, P> {
     spi: S,
@@ -1344,49 +1364,50 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
 ///
 /// ## Usage Examples
 ///
-/// ```rust,ignore
-/// // Send command and receive response
-/// let response = nfc.send_receive(&[0x26])?; // REQA command
+/// ```rust
+/// # use st25r95::{Error, ReadResponse};
+/// // A response to a REQA command, as `send_receive` returns it
+/// let response = ReadResponse::try_from([0x80, 0x02, 0x44, 0x00].as_slice())?;
 ///
 /// // Check for errors
-/// if response.code != 0 {
-///     let hw_error = St25r95Error::from(response.code);
-///     return Err(Error::Hw(hw_error));
-/// }
+/// response.ensure_ok()?;
 ///
 /// // Process response data
 /// match response.data.len() {
-///     0 => println!("No data returned"),
-///     2 => println!("ATQA: {:02X?}", response.data),
-///     len => println!("Received {} bytes: {:02X?}", len, response.data),
+///     0 => { /* no data returned */ }
+///     2 => { /* ATQA */ }
+///     _ => { /* protocol-specific payload */ }
 /// }
 ///
 /// // Validate expected response length
 /// response.expect_data_len(2)?; // Expect exactly 2 bytes for ATQA
+/// # Ok::<(), Error>(())
 /// ```
 ///
 /// ## Error Handling
 ///
 /// Always check the status code before processing data:
 ///
-/// ```rust,ignore
-/// let response = nfc.send_receive(cmd)?;
-///
-/// // Convert status code to hardware error
-/// if response.code != 0 {
-///     match St25r95Error::from(response.code) {
-///         St25r95Error::FrameTimeoutOrNoTag => {
+/// ```rust
+/// # use st25r95::{Error, ReadResponse, Result, St25r95Error};
+/// fn inspect(response: &ReadResponse) -> Result<()> {
+///     match response.ensure_ok() {
+///         Ok(()) => Ok(()),
+///         Err(Error::Hw(St25r95Error::FrameTimeoutOrNoTag)) => {
 ///             // No tag present, handle gracefully
-///         },
-///         St25r95Error::CrcError => {
-///             // Data corruption, retry operation
-///         },
-///         error => {
-///             // Other hardware error
-///             return Err(Error::Hw(error));
+///             Ok(())
 ///         }
+///         Err(Error::Hw(St25r95Error::CrcError)) => {
+///             // Data corruption, the caller may retry the operation
+///             Ok(())
+///         }
+///         // Other hardware error
+///         Err(error) => Err(error),
 ///     }
 /// }
+/// # let timeout = ReadResponse::try_from([0x87, 0x00].as_slice())?;
+/// # assert_eq!(inspect(&timeout), Ok(()));
+/// # Ok::<(), Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadResponse {
@@ -1436,10 +1457,12 @@ impl ReadResponse {
     /// Status code that can be converted to `St25r95Error`
     ///
     /// ## Example
-    /// ```rust,ignore
+    /// ```rust
+    /// # use st25r95::{ReadResponse, St25r95Error};
     /// let raw_status = 0x8D; // CRC error with protocol flag
-    /// let error_code = ReadResponse::code(raw_status); // 0x8D
-    /// let hw_error = St25r95Error::from(error_code); // St25r95Error::CrcError
+    /// let error_code = ReadResponse::code(raw_status);
+    /// assert_eq!(error_code, 0x8D);
+    /// assert_eq!(St25r95Error::from(error_code), St25r95Error::CrcError);
     /// ```
     pub fn code(value: u8) -> u8 {
         if value & 0x8F == 0x80 {
@@ -1485,12 +1508,13 @@ impl ReadResponse {
     /// Decoded data length in bytes (0-530)
     ///
     /// ## Example
-    /// ```rust,ignore
+    /// ```rust
+    /// # use st25r95::ReadResponse;
     /// // Short frame: 10 bytes
     /// assert_eq!(ReadResponse::data_len([0x00, 10]), 10);
     ///
-    /// // Long frame: 300 bytes  
-    /// assert_eq!(ReadResponse::data_len([0x81, 44]), 300);
+    /// // Long frame: 300 bytes
+    /// assert_eq!(ReadResponse::data_len([0xA0, 44]), 300);
     /// ```
     pub fn data_len(value: [u8; 2]) -> usize {
         // See datasheet section 4.3 (Support of long frames)
@@ -1517,12 +1541,14 @@ impl ReadResponse {
     /// - `Err(Error::InvalidResponseLength)`: Length mismatch
     ///
     /// ## Example
-    /// ```rust,ignore
-    /// let response = nfc.send_receive(&[0x26])?; // REQA command
-    ///
+    /// ```rust
+    /// # use st25r95::{Error, ReadResponse};
+    /// # let response = ReadResponse::try_from([0x80, 0x02, 0x44, 0x00].as_slice())?;
     /// // ISO14443A ATQA should be exactly 2 bytes
     /// response.expect_data_len(2)?;
     /// let atqa = u16::from_le_bytes([response.data[0], response.data[1]]);
+    /// assert_eq!(atqa, 0x0044);
+    /// # Ok::<(), Error>(())
     /// ```
     ///
     /// ## Common Expected Lengths
@@ -1611,6 +1637,11 @@ impl TryFrom<&[u8]> for EchoResponse {
         }
     }
 }
+
+/// The crate README, compiled as a doctest so its examples cannot go stale.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct Readme;
 
 #[cfg(test)]
 mod tests {

@@ -48,18 +48,26 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use st25r95::{
+//! #     iso14443b,
+//! #     mock::{MockGpio, MockSpi},
+//! #     St25r95,
+//! # };
+//! # let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 //! // Reader mode with default settings
 //! let mut reader = nfc.protocol_select_iso14443b(Default::default())?;
 //!
 //! // Send ATTRIB command to select Type B card
 //! let response = reader.send_receive(&[0x1D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00])?;
 //!
-//! // Configure for high-security applications
-//! let params = iso14443b::reader::Parameters::new()
-//!     .speed(iso14443b::reader::Speed::Kbps52)
-//!     .modulation(iso14443b::reader::Modulation::Percent100)
-//!     .wait_for_sof();
+//! // Re-select with CRC handling and a longer frame waiting time
+//! let params = iso14443b::reader::Parameters::default()
+//!     .with_crc()
+//!     .fwt(iso14443b::reader::FWT::new(4, 0, 0).unwrap());
+//! let mut reader = reader.protocol_select_iso14443b(params)?;
+//! # let _ = (response, reader);
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 
 pub mod reader {

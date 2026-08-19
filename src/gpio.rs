@@ -62,17 +62,28 @@ pub trait St25r95Gpio {
     ///
     /// ## Example Implementation
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # struct MyGpio;
+    /// # impl MyGpio {
+    /// #     fn set_irq_in_high(&mut self) {}
+    /// #     fn set_irq_in_low(&mut self) {}
+    /// #     fn delay_us(&mut self, _us: u32) {}
+    /// # }
+    /// # impl st25r95::St25r95Gpio for MyGpio {
+    /// # fn wait_irq_out_falling_edge(&mut self, _timeout: u32) -> Result<(), ()> {
+    /// #     Ok(())
+    /// # }
     /// fn irq_in_pulse_low(&mut self) {
     ///     // make sure we start with a high state
-    ///     self.irq_in.set_high().unwrap();
-    ///     delay.delay_us(10);
-    ///     self.irq_in.set_low().unwrap();
+    ///     self.set_irq_in_high();
+    ///     self.delay_us(10);
+    ///     self.set_irq_in_low();
     ///     // Wait at least 1μs (use timer or delay)
-    ///     delay.delay_us(10);
-    ///     self.irq_in.set_high().unwrap();
-    ///     delay.delay_ms(11);
+    ///     self.delay_us(10);
+    ///     self.set_irq_in_high();
+    ///     self.delay_us(11_000);
     /// }
+    /// # }
     /// ```
     fn irq_in_pulse_low(&mut self);
 
@@ -107,27 +118,43 @@ pub trait St25r95Gpio {
     /// ## Implementation Strategies
     ///
     /// **Polling approach** (simple):
-    /// ```rust,ignore
+    /// ```rust
+    /// # struct MyGpio;
+    /// # impl MyGpio {
+    /// #     fn now_ms(&self) -> u32 { 1 }
+    /// #     fn irq_out_is_low(&self) -> bool { true }
+    /// # }
+    /// # impl st25r95::St25r95Gpio for MyGpio {
+    /// # fn irq_in_pulse_low(&mut self) {}
     /// fn wait_irq_out_falling_edge(&mut self, timeout: u32) -> Result<(), ()> {
-    ///     let start = get_current_time();
-    ///     while get_current_time() - start < timeout {
-    ///         if self.irq_out.is_low().unwrap() {
+    ///     let start = self.now_ms();
+    ///     while self.now_ms() - start < timeout {
+    ///         if self.irq_out_is_low() {
     ///             return Ok(());
     ///         }
     ///     }
     ///     Err(())
     /// }
+    /// # }
     /// ```
     ///
     /// **Interrupt approach** (efficient):
-    /// ```rust,ignore
+    /// ```rust
+    /// # struct MyGpio;
+    /// # impl MyGpio {
+    /// #     fn configure_falling_edge_interrupt(&mut self) {}
+    /// #     fn wait_for_interrupt(&mut self, _timeout: u32) -> Result<(), ()> { Ok(()) }
+    /// # }
+    /// # impl st25r95::St25r95Gpio for MyGpio {
+    /// # fn irq_in_pulse_low(&mut self) {}
     /// fn wait_irq_out_falling_edge(&mut self, timeout: u32) -> Result<(), ()> {
     ///     // Configure external interrupt on falling edge
-    ///     self.irq_out.configure_interrupt(FallingEdge);
-    ///     
+    ///     self.configure_falling_edge_interrupt();
+    ///
     ///     // Wait for interrupt with timeout
     ///     self.wait_for_interrupt(timeout)
     /// }
+    /// # }
     /// ```
     #[allow(clippy::result_unit_err)]
     fn wait_irq_out_falling_edge(&mut self, timeout: u32) -> Result<(), ()>;

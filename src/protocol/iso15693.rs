@@ -58,17 +58,26 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use st25r95::{
+//! #     iso15693,
+//! #     mock::{MockGpio, MockSpi},
+//! #     St25r95,
+//! # };
+//! # let nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 //! // Reader mode with default settings
 //! let mut reader = nfc.protocol_select_iso15693(Default::default())?;
 //!
 //! // Inventory command to detect all ISO15693 tags
 //! let response = reader.send_receive(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])?;
 //!
-//! // Configure for high-speed inventory
-//! let params = iso15693::reader::Parameters::new()
-//!     .tx_data_rate(iso15693::reader::DataRate::Kbps424)
-//!     .rx_data_rate(iso15693::reader::DataRate::Kbps424);
+//! // Re-select for a faster inventory on a single subcarrier
+//! let params = iso15693::reader::Parameters::default()
+//!     .speed(iso15693::reader::Speed::Kbps52)
+//!     .subcarrier(iso15693::reader::Subcarrier::Single);
+//! let mut reader = reader.protocol_select_iso15693(params)?;
+//! # let _ = (response, reader);
+//! # Ok::<(), st25r95::Error>(())
 //! ```
 
 pub mod reader {

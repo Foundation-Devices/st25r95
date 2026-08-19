@@ -29,64 +29,80 @@
 //! ## Error Handling Strategies
 //!
 //! ### Basic Error Recovery
-//! ```rust,ignore
-//! match nfc.send_receive(&cmd) {
-//!     Ok(response) => process_response(response),
-//!     Err(Error::ResponseInProgress) => {
-//!         // The chip is still running the command: wait longer for the same
-//!         // operation instead of sending a new one.
-//!         nfc.poll_pending_response(1_000)
-//!     },
-//!     Err(Error::FrameTimeoutOrNoTag) => {
-//!         // No tag present, wait for tag
-//!         wait_for_tag()
-//!     },
-//!     Err(Error::Spi) => {
-//!         // Reset SPI interface
-//!         reset_spi()
-//!     },
-//!     Err(e) => {
-//!         // Log and handle other errors
-//!         log::error!("Unexpected error: {:?}", e);
+//! ```rust
+//! # use st25r95::{Error, ReadResponse, Result, St25r95Error};
+//! fn handle(result: Result<ReadResponse>) -> Result<()> {
+//!     match result {
+//!         Ok(response) => process_response(response),
+//!         Err(Error::ResponseInProgress) => {
+//!             // The chip is still running the command: wait longer for that
+//!             // same operation instead of sending a new one
+//!             wait_longer()
+//!         }
+//!         Err(Error::Hw(St25r95Error::FrameTimeoutOrNoTag)) => {
+//!             // No tag present, wait for a tag
+//!             wait_for_tag()
+//!         }
+//!         Err(Error::Spi) => {
+//!             // Reset the SPI interface
+//!             reset_spi()
+//!         }
+//!         // Report anything else to the caller
+//!         Err(error) => Err(error),
 //!     }
 //! }
+//! # fn process_response(_: ReadResponse) -> Result<()> { Ok(()) }
+//! # fn wait_longer() -> Result<()> { Ok(()) }
+//! # fn wait_for_tag() -> Result<()> { Ok(()) }
+//! # fn reset_spi() -> Result<()> { Ok(()) }
 //! ```
 //!
 //! ### Hardware-Specific Recovery
-//! ```rust,ignore
-//! match nfc.send_receive(&cmd) {
-//!     Err(Error::Hw(St25r95Error::CrcError)) => {
-//!         // Retry once for transient CRC errors
-//!         nfc.send_receive(&cmd)
-//!     },
-//!     Err(Error::Hw(St25r95Error::FrameTimeoutOrNoTag)) => {
-//!         // Check if field is on and tag is present
-//!         if !nfc.poll_field(None)? {
-//!             return Err(Error::NoTagPresent);
+//! ```rust
+//! # use st25r95::{Error, ReadResponse, Result, St25r95Error};
+//! fn handle(result: Result<ReadResponse>) -> Result<()> {
+//!     match result {
+//!         Err(Error::Hw(St25r95Error::CrcError)) => {
+//!             // Retry once for transient CRC errors
+//!             retry().map(|_| ())
 //!         }
-//!         nfc.send_receive(&cmd)
-//!     },
-//!     // ... handle other hardware errors
+//!         Err(Error::Hw(St25r95Error::FrameTimeoutOrNoTag)) => {
+//!             // Check that the field is on and a tag is present first
+//!             if field_present()? {
+//!                 retry().map(|_| ())
+//!             } else {
+//!                 Ok(())
+//!             }
+//!         }
+//!         // ... handle other hardware errors
+//!         other => other.map(|_| ()),
+//!     }
 //! }
+//! # fn retry() -> Result<ReadResponse> {
+//! #     ReadResponse::try_from([0x00, 0x00].as_slice())
+//! # }
+//! # fn field_present() -> Result<bool> { Ok(true) }
 //! ```
 //!
 //! ### Calibration Error Handling
-//! ```rust,ignore
-//! match nfc.calibrate_tag_detector() {
-//!     Ok(dac_ref) => {
-//!         // Calibration successful, use tag detection
-//!         setup_idle_mode_with_tag_detection(dac_ref)
-//!     },
-//!     Err(Error::CalibTagDetectionFailed) => {
-//!         // Tag detection not possible, use other wake-up sources
-//!         setup_idle_mode_without_tag_detection()
-//!     },
-//!     Err(e) => {
+//! ```rust
+//! # use st25r95::{Error, Result};
+//! fn handle(result: Result<u8>) -> Result<()> {
+//!     match result {
+//!         Ok(dac_ref) => {
+//!             // Calibration successful, tag detection can be used
+//!             setup_idle_mode_with_tag_detection(dac_ref)
+//!         }
+//!         Err(Error::CalibTagDetectionFailed) => {
+//!             // Tag detection not possible, use other wake-up sources
+//!             setup_idle_mode_without_tag_detection()
+//!         }
 //!         // Other calibration error
-//!         log::warn!("Calibration failed: {:?}", e);
-//!         use_fallback_configuration()
+//!         Err(error) => Err(error),
 //!     }
 //! }
+//! # fn setup_idle_mode_with_tag_detection(_: u8) -> Result<()> { Ok(()) }
+//! # fn setup_idle_mode_without_tag_detection() -> Result<()> { Ok(()) }
 //! ```
 
 use derive_more::From;
