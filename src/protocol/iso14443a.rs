@@ -53,7 +53,7 @@
 //! ```
 
 pub mod reader {
-    use super::super::ProtocolParams;
+    use super::super::{ProtocolParams, MAX_DD, MAX_PP};
 
     #[derive(Debug, Copy, Clone, Default)]
     pub enum DataRate {
@@ -71,11 +71,17 @@ pub mod reader {
     }
 
     impl FDT {
+        /// Build a frame delay time from its `PP`, `MM` and `DD` components.
+        ///
+        /// Returns `None` when a component is out of the range documented by
+        /// the datasheet (DS12807, Table 12): `PP` must not exceed
+        /// [`MAX_PP`](crate::MAX_PP) (`0x0E`, larger values are reserved) and
+        /// `DD` must not exceed [`MAX_DD`](crate::MAX_DD) (`127`).
         pub fn new(pp: u8, mm: u8, dd: u8) -> Option<Self> {
-            if pp > 15 {
+            if pp > MAX_PP {
                 return None;
             }
-            if dd > 127 {
+            if dd > MAX_DD {
                 return None;
             }
             Some(Self { pp, mm, dd })
@@ -146,10 +152,13 @@ pub mod reader {
 
         #[test]
         pub fn test_fdt() {
+            // 0x0F and above are reserved for `PP` (datasheet Table 12).
+            assert!(FDT::new(15, 0, 0).is_none());
             assert!(FDT::new(16, 0, 0).is_none());
+            assert!(FDT::new(u8::MAX, 0, 0).is_none());
             assert!(FDT::new(0, 0, 128).is_none());
             assert_eq!(FDT::new(0, 0, 0).unwrap().us(), 302.06488);
-            assert_eq!(FDT::new(15, 0, 0).unwrap().us(), 9898062.0);
+            assert_eq!(FDT::new(MAX_PP, 0, 0).unwrap().us(), 4949031.0);
             assert_eq!(FDT::new(0, 255, 0).unwrap().us(), 77328.61);
             assert_eq!(FDT::new(0, 0, 127).unwrap().us(), 601.7699);
         }
@@ -167,6 +176,17 @@ pub mod reader {
                     .fdt(FDT::new(1, 2, 3).unwrap())
                     .data(),
                 ([0xA0, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00], 4),
+            );
+        }
+
+        #[test]
+        pub fn test_parameters_max_pp() {
+            // The largest `PP` the datasheet allows must serialize as 0x0E.
+            assert_eq!(
+                Parameters::default()
+                    .fdt(FDT::new(MAX_PP, 0, 0).unwrap())
+                    .data(),
+                ([0x00, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 4),
             );
         }
     }

@@ -83,7 +83,7 @@
 //! ```
 
 pub mod reader {
-    use super::super::ProtocolParams;
+    use super::super::{ProtocolParams, MAX_PP};
 
     #[derive(Debug, Copy, Clone, Default)]
     pub enum DataRate {
@@ -100,8 +100,13 @@ pub mod reader {
     }
 
     impl RWT {
+        /// Build a receive waiting time from its `PP` and `MM` components.
+        ///
+        /// Returns `None` when `pp` exceeds [`MAX_PP`](crate::MAX_PP)
+        /// (`0x0E`); the datasheet (DS12807, Table 12) reserves every larger
+        /// value.
         pub fn new(pp: u8, mm: u8) -> Option<Self> {
-            if pp > 15 {
+            if pp > MAX_PP {
                 return None;
             }
             Some(Self { pp, mm })
@@ -180,9 +185,12 @@ pub mod reader {
 
         #[test]
         pub fn test_rwt() {
+            // 0x0F and above are reserved for `PP` (datasheet Table 12).
+            assert!(RWT::new(15, 0).is_none());
             assert!(RWT::new(16, 0).is_none());
+            assert!(RWT::new(u8::MAX, 0).is_none());
             assert_eq!(RWT::new(0, 0).unwrap().us(), 302.06488);
-            assert_eq!(RWT::new(15, 0).unwrap().us(), 9898062.0);
+            assert_eq!(RWT::new(MAX_PP, 0).unwrap().us(), 4949031.0);
             assert_eq!(RWT::new(0, 255).unwrap().us(), 77328.61);
         }
 
@@ -204,6 +212,17 @@ pub mod reader {
                     .rwt(RWT::new(1, 2).unwrap())
                     .data(),
                 ([0x51, 0x10, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00], 4)
+            );
+        }
+
+        #[test]
+        pub fn test_parameters_max_pp() {
+            // The largest `PP` the datasheet allows must serialize as 0x0E.
+            assert_eq!(
+                Parameters::default()
+                    .rwt(RWT::new(MAX_PP, 0).unwrap())
+                    .data(),
+                ([0x00, 0x10, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00], 4)
             );
         }
     }

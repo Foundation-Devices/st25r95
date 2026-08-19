@@ -41,6 +41,21 @@ pub mod iso14443a;
 pub mod iso14443b;
 pub mod iso15693;
 
+/// Maximum value of the `PP` timing exponent accepted by the ST25R95.
+///
+/// `PP` is the shared exponent of the ISO/IEC 14443-A frame delay time
+/// (`FDT`), the ISO/IEC 14443-B frame waiting time (`FWT`) and the FeliCa
+/// receive waiting time (`RWT`). The datasheet (DS12807, Table 12) documents
+/// `0x00`-`0x0E` for all three protocols and marks larger values as reserved,
+/// so `0x0F` must never reach the ProtocolSelect command.
+pub const MAX_PP: u8 = 0x0E;
+
+/// Maximum value of the `DD` timing coefficient accepted by the ST25R95.
+///
+/// `DD` is a 7-bit field of the ISO/IEC 14443-A `FDT` and ISO/IEC 14443-B
+/// `FWT` parameters (datasheet DS12807, Table 12).
+pub const MAX_DD: u8 = 127;
+
 /// Enumeration of supported NFC protocols for the ST25R95
 ///
 /// Each protocol variant corresponds to a specific configuration of the ST25R95
