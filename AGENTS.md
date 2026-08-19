@@ -13,14 +13,15 @@
 
 ### Linting & Formatting
 - `cargo clippy -- -D warnings` - Run clippy linter (stable toolchain)
-- `cargo +nightly-2025-06-24 fmt` - Format code with rustfmt (unstable options)
+- `cargo fmt` - Format code with rustfmt (devenv pins the nightly-2025-06-24
+  rustfmt the CI `fmt` job uses, because rustfmt.toml enables unstable options)
 - `cargo sort` - Sort imports (cargo-sort tool required)
 
 ## Code Style Guidelines
 
 ### Rust Version & Toolchain
 - Builds, tests and clippy run on stable 1.87.0 (the manifest MSRV)
-- `cargo fmt` needs nightly-2025-06-24: rustfmt.toml uses unstable options
+- `rustfmt` is nightly-2025-06-24, pinned in devenv.nix to match the CI `fmt` job
 - Target: thumbv7em-none-eabi for embedded builds
 - Components: rustfmt, clippy, rustc
 
