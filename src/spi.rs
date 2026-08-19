@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2024 Foundation Devices, Inc. <hello@foundationdevices.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::{Command, PollFlags, ReadResponse, Result};
+use crate::{Command, PollFlags, ReadResponse, Result, ECHO_RESPONSE_MAX_LEN};
 
 /// Trait for SPI communication with the ST25R95 NFC transceiver
 ///
@@ -121,6 +121,40 @@ pub trait St25r95Spi {
     /// - Data length
     /// - Data payload (if length > 0)
     fn read_data(&mut self) -> Result<ReadResponse>;
+
+    /// Read the raw answer to an `Echo` command
+    ///
+    /// `Echo` is the only command whose answer is not a `<Status><Len><Data>`
+    /// frame, so it must not go through [`read_data`](Self::read_data): a bare
+    /// `0x55` cannot be represented as a [`ReadResponse`], and forcing it into
+    /// one drops the framed status that follows when the Echo leaves Listen
+    /// mode. The ST25R95 has exactly two documented answers (datasheet
+    /// DS12807):
+    ///
+    /// ```text
+    /// Ordinary Echo:        0x55            (1 byte)
+    /// Echo leaving Listen:  0x55 0x85 0x00  (3 bytes: Echo byte, then the
+    ///                                        framed UserStop response)
+    /// ```
+    ///
+    /// ## Parameters
+    /// - `buf`: destination for the bytes the chip returned, verbatim
+    ///
+    /// ## Returns
+    /// - `Ok(len)`: number of bytes written to `buf`, 1 or 3 for the two forms above
+    /// - `Err(Error::Spi)`: SPI communication error
+    ///
+    /// ## Implementation Requirements
+    ///
+    /// - Read the answer in a single chip-select transaction, so the Echo byte and the
+    ///   frame that may follow it cannot be split across transactions.
+    /// - Copy the bytes as they arrive. Do not interpret, reorder, drop or substitute any
+    ///   of them, and do not report more bytes than were written: the driver validates
+    ///   the answer and turns it into an [`EchoResponse`](crate::EchoResponse), returning
+    ///   `Err(Error::EchoFailed)` for anything that is not one of the two documented
+    ///   forms.
+    /// - Reporting a short read is correct behaviour; padding `buf` to hide one is not.
+    fn read_echo(&mut self, buf: &mut [u8; ECHO_RESPONSE_MAX_LEN]) -> Result<usize>;
 
     /// Flush any pending SPI data or clear the SPI buffer
     ///

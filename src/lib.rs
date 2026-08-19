@@ -279,6 +279,17 @@ pub const MAX_BUFFER_SIZE: usize = 530;
 /// what to do with a length it cannot encode.
 pub const MAX_COMMAND_DATA_LEN: usize = u8::MAX as usize;
 
+/// Byte the ST25R95 answers to an `Echo` command
+pub const ECHO_BYTE: u8 = 0x55;
+
+/// Maximum length of the raw answer to an `Echo` command
+///
+/// An ordinary Echo answers with the single byte [`ECHO_BYTE`]. An Echo that
+/// leaves Listen mode answers with that byte followed by the two-byte framed
+/// response `0x85 0x00`, i.e. [`St25r95Error::UserStop`] with no data
+/// (datasheet DS12807).
+pub const ECHO_RESPONSE_MAX_LEN: usize = 3;
+
 /// Main driver struct for the ST25R95 NFC transceiver chip
 ///
 /// This struct uses a type-state pattern to ensure correct usage at compile time.
@@ -367,12 +378,20 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
 
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95.
+    ///
+    /// Succeeds only when the chip answers with the single byte
+    /// [`ECHO_BYTE`]. If it answers the Echo byte followed by a framed
+    /// status - which is what happens when the Echo leaves Listen mode - that
+    /// status is returned as an error instead of being discarded; use
+    /// `cancel_listen` to leave Listen mode on purpose.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.send_command(Command::Echo, &[])?;
         self.poll_irq_out(100)?;
-        let response = self.spi.read_data()?;
-        response.expect_data_len(0)
+        match self.read_echo()? {
+            EchoResponse::Echo => Ok(()),
+            EchoResponse::ListenCancelled(response) => response.expect_data_len(0),
+        }
     }
 }
 
@@ -392,12 +411,20 @@ impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldO
 
     /// The Echo command verifies the possibility of communication between a Host and the
     /// ST25R95.
+    ///
+    /// Succeeds only when the chip answers with the single byte
+    /// [`ECHO_BYTE`]. If it answers the Echo byte followed by a framed
+    /// status - which is what happens when the Echo leaves Listen mode - that
+    /// status is returned as an error instead of being discarded; use
+    /// `cancel_listen` to leave Listen mode on purpose.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.send_command(Command::Echo, &[])?;
         self.poll_irq_out(100)?;
-        let response = self.spi.read_data()?;
-        response.expect_data_len(0)
+        match self.read_echo()? {
+            EchoResponse::Echo => Ok(()),
+            EchoResponse::ListenCancelled(response) => response.expect_data_len(0),
+        }
     }
 }
 
@@ -422,6 +449,22 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             return Err(Error::InvalidDataLen(data.len()));
         }
         self.spi.send_command(cmd, data, false)
+    }
+
+    /// Read and validate the answer to an `Echo` command.
+    ///
+    /// Echo is the one command whose answer is not a `<Status><Len><Data>`
+    /// frame, so it is read through [`St25r95Spi::read_echo`] rather than
+    /// [`St25r95Spi::read_data`]: a bare [`ECHO_BYTE`] cannot be represented
+    /// as a [`ReadResponse`], and squeezing it into one loses the framed
+    /// status that follows when the Echo leaves Listen mode.
+    fn read_echo(&mut self) -> Result<EchoResponse> {
+        let mut buf = [0u8; ECHO_RESPONSE_MAX_LEN];
+        let len = self.spi.read_echo(&mut buf)?;
+        // An implementation that reports more bytes than it could have written
+        // is not trustworthy enough to parse.
+        let read = buf.get(..len).ok_or(Error::EchoFailed)?;
+        EchoResponse::try_from(read)
     }
 
     fn poll_irq_out(&mut self, timeout: u32) -> Result<()> {
@@ -1125,22 +1168,29 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     /// Cancel an active Listen mode by sending an Echo command from the host.
     ///
     /// Per the datasheet, the chip exits Listen mode when it receives an Echo
-    /// from the MCU; the chip then surfaces a `UserStop` error which this
-    /// helper consumes to flip the internal listen flag back to false. Use
+    /// from the MCU. It then answers [`ECHO_BYTE`] followed by the framed
+    /// `UserStop` response reporting why listening stopped; this helper
+    /// consumes both and flips the internal listen flag back to false. Use it
     /// when the application needs to abort an outstanding `listen()` (e.g.
     /// session timeout) before sending another command.
+    ///
+    /// A chip that answers the Echo byte alone had already left Listen mode -
+    /// an external reader command ended it - which is also a success.
     pub fn cancel_listen(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.send_command(Command::Echo, &[])?;
         self.poll_irq_out(100)?;
-        let response = self.spi.read_data()?;
-        match response.expect_data_len(0) {
-            Err(Error::Hw(St25r95Error::UserStop)) if self.role.0 => {
-                self.role.0 = false;
-                Ok(())
-            }
-            r => r,
+        match self.read_echo()? {
+            EchoResponse::Echo => {}
+            EchoResponse::ListenCancelled(response) => match response.expect_data_len(0) {
+                // Leaving Listen mode on request is reported as `UserStop`;
+                // here that is the expected outcome, not a failure.
+                Ok(()) | Err(Error::Hw(St25r95Error::UserStop)) => {}
+                Err(error) => return Err(error),
+            },
         }
+        self.role.0 = false;
+        Ok(())
     }
 }
 
@@ -1405,6 +1455,54 @@ impl TryFrom<&[u8]> for ReadResponse {
     }
 }
 
+/// Answer of the ST25R95 to an `Echo` command
+///
+/// Echo is the only command whose answer is not a `<Status><Len><Data>` frame,
+/// so it cannot be described by a [`ReadResponse`] alone. The chip has two
+/// documented ways of answering (datasheet DS12807):
+///
+/// ```text
+/// Ordinary Echo:      0x55
+/// Echo leaving Listen: 0x55 0x85 0x00
+/// ```
+///
+/// The second form is the Echo byte followed by a normal frame carrying the
+/// reason listening stopped, which is why both parts are kept here instead of
+/// being collapsed into a single status byte.
+// `ReadResponse` embeds the maximum frame buffer, and `no_std` leaves nowhere to
+// box it. The value only lives on the stack for the duration of one Echo, just
+// like every other frame the driver reads.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum EchoResponse {
+    /// The chip answered with exactly [`ECHO_BYTE`] and nothing else.
+    Echo,
+
+    /// The chip answered [`ECHO_BYTE`] followed by a framed response.
+    ///
+    /// This happens when the Echo was used to leave Listen mode; the frame
+    /// then reports [`St25r95Error::UserStop`].
+    ListenCancelled(ReadResponse),
+}
+
+impl TryFrom<&[u8]> for EchoResponse {
+    type Error = crate::Error;
+
+    /// Parse the raw bytes returned by [`St25r95Spi::read_echo`].
+    ///
+    /// Anything that is not an exact Echo byte, optionally followed by a
+    /// well-formed frame, is rejected: a short read, trailing bytes, or a
+    /// stale response left over from a previous command all fail here rather
+    /// than being reported as a successful Echo.
+    fn try_from(value: &[u8]) -> core::result::Result<Self, Self::Error> {
+        match value {
+            [ECHO_BYTE] => Ok(Self::Echo),
+            [ECHO_BYTE, frame @ ..] => Ok(Self::ListenCancelled(ReadResponse::try_from(frame)?)),
+            _ => Err(Error::EchoFailed),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {super::*, core::ops::Range};
@@ -1429,6 +1527,11 @@ mod tests {
                 code: 0,
                 data: heapless::Vec::new(),
             })
+        }
+
+        fn read_echo(&mut self, buf: &mut [u8; ECHO_RESPONSE_MAX_LEN]) -> Result<usize> {
+            buf[0] = ECHO_BYTE;
+            Ok(1)
         }
 
         fn flush(&mut self) -> Result<()> {
@@ -1478,6 +1581,11 @@ mod tests {
             })
         }
 
+        fn read_echo(&mut self, buf: &mut [u8; ECHO_RESPONSE_MAX_LEN]) -> Result<usize> {
+            buf[0] = ECHO_BYTE;
+            Ok(1)
+        }
+
         fn flush(&mut self) -> Result<()> {
             Ok(())
         }
@@ -1517,6 +1625,66 @@ mod tests {
             let mut data = heapless::Vec::new();
             data.push(wake_source).unwrap();
             Ok(ReadResponse { code: 0, data })
+        }
+
+        fn read_echo(&mut self, buf: &mut [u8; ECHO_RESPONSE_MAX_LEN]) -> Result<usize> {
+            buf[0] = ECHO_BYTE;
+            Ok(1)
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// SPI mock that answers `Echo` at the wire level.
+    ///
+    /// `read_data` panics on purpose: the Echo paths must never route the
+    /// unframed answer through the framed response parser.
+    struct EchoSpi<const N: usize> {
+        response: [u8; N],
+        reported_len: Option<usize>,
+    }
+
+    impl<const N: usize> EchoSpi<N> {
+        fn new(response: [u8; N]) -> Self {
+            Self {
+                response,
+                reported_len: None,
+            }
+        }
+
+        /// Answer `response` but claim a different number of bytes was read,
+        /// as a misbehaving implementation would.
+        fn reporting(response: [u8; N], reported_len: usize) -> Self {
+            Self {
+                response,
+                reported_len: Some(reported_len),
+            }
+        }
+    }
+
+    impl<const N: usize> St25r95Spi for EchoSpi<N> {
+        fn poll(&mut self, _flags: PollFlags) -> Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_command(&mut self, _cmd: Command, _data: &[u8], _sod: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_data(&mut self) -> Result<ReadResponse> {
+            panic!("an Echo answer must not be read as a framed response")
+        }
+
+        fn read_echo(&mut self, buf: &mut [u8; ECHO_RESPONSE_MAX_LEN]) -> Result<usize> {
+            let len = self.response.len().min(buf.len());
+            buf[..len].copy_from_slice(&self.response[..len]);
+            Ok(self.reported_len.unwrap_or(self.response.len()))
         }
 
         fn flush(&mut self) -> Result<()> {
@@ -1559,11 +1727,11 @@ mod tests {
         card_emulation_with_spi(RecordingSpi::default(), CardEmulation(false), protocol)
     }
 
-    fn card_emulation_with_spi<P>(
-        spi: RecordingSpi,
+    fn card_emulation_with_spi<S, P>(
+        spi: S,
         role: CardEmulation,
         protocol: P,
-    ) -> St25r95<RecordingSpi, NoopGpio, FieldOn, CardEmulation, P> {
+    ) -> St25r95<S, NoopGpio, FieldOn, CardEmulation, P> {
         St25r95 {
             spi,
             gpio: NoopGpio,
@@ -1575,9 +1743,7 @@ mod tests {
         }
     }
 
-    fn unselected_driver(
-        spi: RecordingSpi,
-    ) -> St25r95<RecordingSpi, NoopGpio, FieldOff, NoRole, NoProtocol> {
+    fn unselected_driver<S>(spi: S) -> St25r95<S, NoopGpio, FieldOff, NoRole, NoProtocol> {
         St25r95 {
             spi,
             gpio: NoopGpio,
@@ -1907,14 +2073,6 @@ mod tests {
             card.set_anti_collision_state(AntiColState::Idle),
             St25r95Error::InvalidCommandLength,
         );
-
-        let mut card = card_emulation_with_spi(
-            RecordingSpi::with_response_code(0x82),
-            CardEmulation(true),
-            Iso14443A,
-        );
-        assert_hw_error(card.cancel_listen(), St25r95Error::InvalidCommandLength);
-        assert!(card.role.0);
     }
 
     #[test]
@@ -1936,15 +2094,112 @@ mod tests {
     }
 
     #[test]
-    pub fn test_cancel_listen_consumes_user_stop_while_listening() {
+    pub fn test_echo_response_wire_forms() {
+        // Ordinary Echo.
+        assert_eq!(
+            EchoResponse::try_from([ECHO_BYTE].as_slice()),
+            Ok(EchoResponse::Echo)
+        );
+
+        // Echo that leaves Listen mode, followed by its framed UserStop.
+        match EchoResponse::try_from([ECHO_BYTE, 0x85, 0x00].as_slice()) {
+            Ok(EchoResponse::ListenCancelled(response)) => {
+                assert_eq!(response.code, 0x85);
+                assert!(response.data.is_empty());
+                assert_eq!(
+                    response.expect_data_len(0),
+                    Err(Error::Hw(St25r95Error::UserStop))
+                );
+            }
+            other => panic!("expected a cancelled listen, got {other:?}"),
+        }
+
+        // Short reads.
+        assert_eq!(
+            EchoResponse::try_from([].as_slice()),
+            Err(Error::EchoFailed)
+        );
+        assert_eq!(
+            EchoResponse::try_from([ECHO_BYTE, 0x85].as_slice()),
+            Err(Error::InvalidDataLen(1))
+        );
+
+        // Extra bytes trailing an otherwise complete answer.
+        assert_eq!(
+            EchoResponse::try_from([ECHO_BYTE, 0x85, 0x00, 0x00].as_slice()),
+            Err(Error::InvalidDataLen(3))
+        );
+
+        // A late response left over from a previous command is not an Echo.
+        assert_eq!(
+            EchoResponse::try_from([0x80, 0x02, 0x26].as_slice()),
+            Err(Error::EchoFailed)
+        );
+        for byte in [0x00, 0x54, 0x56, 0xFF] {
+            assert_eq!(
+                EchoResponse::try_from([byte].as_slice()),
+                Err(Error::EchoFailed)
+            );
+        }
+    }
+
+    #[test]
+    pub fn test_echo_requires_an_exact_echo_byte() {
+        let mut nfc = unselected_driver(EchoSpi::new([ECHO_BYTE]));
+        assert_eq!(nfc.echo(), Ok(()));
+
+        let mut nfc = unselected_driver(EchoSpi::new([0x00]));
+        assert_eq!(nfc.echo(), Err(Error::EchoFailed));
+
+        let mut nfc = unselected_driver(EchoSpi::new([]));
+        assert_eq!(nfc.echo(), Err(Error::EchoFailed));
+
+        // Echoing while the chip is listening surfaces the framed status
+        // rather than reporting a successful Echo.
+        let mut nfc = unselected_driver(EchoSpi::new([ECHO_BYTE, 0x85, 0x00]));
+        assert_hw_error(nfc.echo(), St25r95Error::UserStop);
+
+        // An implementation claiming more bytes than it wrote is refused.
+        let mut nfc = unselected_driver(EchoSpi::reporting([ECHO_BYTE], ECHO_RESPONSE_MAX_LEN + 1));
+        assert_eq!(nfc.echo(), Err(Error::EchoFailed));
+    }
+
+    #[test]
+    pub fn test_cancel_listen_consumes_echo_byte_and_user_stop_frame() {
+        // The documented cancellation answer: Echo byte, then the UserStop
+        // frame. Both are consumed by the single Echo read.
         let mut card = card_emulation_with_spi(
-            RecordingSpi::with_response_code(0x85),
+            EchoSpi::new([ECHO_BYTE, 0x85, 0x00]),
             CardEmulation(true),
             Iso14443A,
         );
-
         assert_eq!(card.cancel_listen(), Ok(()));
         assert!(!card.role.0);
+
+        // An external reader command had already ended Listen mode, so only the
+        // Echo byte comes back.
+        let mut card =
+            card_emulation_with_spi(EchoSpi::new([ECHO_BYTE]), CardEmulation(true), Iso14443A);
+        assert_eq!(card.cancel_listen(), Ok(()));
+        assert!(!card.role.0);
+
+        // Any other framed status is reported and leaves the listen state.
+        let mut card = card_emulation_with_spi(
+            EchoSpi::new([ECHO_BYTE, 0x82, 0x00]),
+            CardEmulation(true),
+            Iso14443A,
+        );
+        assert_hw_error(card.cancel_listen(), St25r95Error::InvalidCommandLength);
+        assert!(card.role.0);
+
+        // A truncated answer is not a cancellation.
+        let mut card = card_emulation_with_spi(
+            EchoSpi::new([ECHO_BYTE, 0x85]),
+            CardEmulation(true),
+            Iso14443A,
+        );
+        assert_eq!(card.cancel_listen(), Err(Error::InvalidDataLen(1)));
+        assert!(card.role.0);
     }
 
     #[test]
