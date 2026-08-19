@@ -290,6 +290,36 @@ pub const ECHO_BYTE: u8 = 0x55;
 /// (datasheet DS12807).
 pub const ECHO_RESPONSE_MAX_LEN: usize = 3;
 
+/// Host-side deadline used when no device-side timeout is configured
+///
+/// Commands that the chip answers immediately (identification, register
+/// access, protocol selection, Echo) never need more than this.
+pub const DEFAULT_RESPONSE_TIMEOUT_MS: u32 = 100;
+
+/// Margin added on top of a configured device-side timeout
+///
+/// Covers the chip's own processing and the SPI turnaround, so the host only
+/// gives up once the chip provably has.
+pub const RESPONSE_TIMEOUT_MARGIN_MS: u32 = 50;
+
+/// Turn a device-side timeout in microseconds into a host-side deadline in
+/// milliseconds.
+///
+/// The result is never shorter than [`DEFAULT_RESPONSE_TIMEOUT_MS`], and never
+/// shorter than the device timeout itself, so a valid long frame wait cannot be
+/// cut short by the host.
+fn host_timeout_ms(device_timeout_us: Option<f32>) -> u32 {
+    let Some(us) = device_timeout_us else {
+        return DEFAULT_RESPONSE_TIMEOUT_MS;
+    };
+    // `f32::ceil` needs `std`; truncating and adding one rounds up instead, and
+    // the `as` cast saturates for values beyond `u32`.
+    ((us / 1000.0) as u32)
+        .saturating_add(1)
+        .saturating_add(RESPONSE_TIMEOUT_MARGIN_MS)
+        .max(DEFAULT_RESPONSE_TIMEOUT_MS)
+}
+
 /// Main driver struct for the ST25R95 NFC transceiver chip
 ///
 /// This struct uses a type-state pattern to ensure correct usage at compile time.
@@ -348,6 +378,10 @@ pub struct St25r95<S, G, F, R, P> {
     gpio: G,
     dac_ref: Option<u8>,
     dac_guard: u8,
+    /// Host-side deadline for the response of the selected configuration.
+    response_timeout: u32,
+    /// Set while a command has been sent and its response not yet consumed.
+    pending_response: bool,
     field: PhantomData<F>,
     role: R,
     protocol: P,
@@ -361,6 +395,8 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
             gpio,
             dac_ref: None,
             dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
             field: PhantomData,
             role: NoRole,
             protocol: NoProtocol,
@@ -387,7 +423,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.send_command(Command::Echo, &[])?;
-        self.poll_irq_out(100)?;
+        self.poll_irq_out(DEFAULT_RESPONSE_TIMEOUT_MS)?;
         match self.read_echo()? {
             EchoResponse::Echo => Ok(()),
             EchoResponse::ListenCancelled(response) => response.expect_data_len(0),
@@ -398,15 +434,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
 impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldOn, R, P> {
     pub fn field_off(mut self) -> ResultSt25r95FieldOff<S, G, R, P> {
         self.select_protocol(Protocol::FieldOff, protocol::FieldOff)?;
-        Ok(St25r95 {
-            spi: self.spi,
-            gpio: self.gpio,
-            dac_ref: self.dac_ref,
-            dac_guard: self.dac_guard,
-            field: PhantomData::<FieldOff>,
-            role: R::default(),
-            protocol: P::default(),
-        })
+        Ok(self.transition(R::default(), P::default()))
     }
 
     /// The Echo command verifies the possibility of communication between a Host and the
@@ -420,7 +448,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldO
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.send_command(Command::Echo, &[])?;
-        self.poll_irq_out(100)?;
+        self.poll_irq_out(DEFAULT_RESPONSE_TIMEOUT_MS)?;
         match self.read_echo()? {
             EchoResponse::Echo => Ok(()),
             EchoResponse::ListenCancelled(response) => response.expect_data_len(0),
@@ -429,6 +457,21 @@ impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldO
 }
 
 impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
+    /// Move to another type state, carrying the runtime state along.
+    fn transition<F2, R2, P2>(self, role: R2, protocol: P2) -> St25r95<S, G, F2, R2, P2> {
+        St25r95 {
+            spi: self.spi,
+            gpio: self.gpio,
+            dac_ref: self.dac_ref,
+            dac_guard: self.dac_guard,
+            response_timeout: self.response_timeout,
+            pending_response: self.pending_response,
+            field: PhantomData,
+            role,
+            protocol,
+        }
+    }
+
     fn reset(&mut self) -> Result<()> {
         self.spi.reset()?;
         // should be in Power-up state
@@ -444,11 +487,20 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     /// Rejecting it here means every [`St25r95Spi`] implementation is handed a
     /// slice it can encode, instead of having to truncate the length itself and
     /// desynchronize the command.
+    ///
+    /// Refuses to send anything while a previous response is still outstanding:
+    /// the datasheet requires the previous operation to complete first, and a
+    /// second command would race the answer to the first.
     fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<()> {
+        if self.pending_response {
+            return Err(Error::ResponseInProgress);
+        }
         if data.len() > MAX_COMMAND_DATA_LEN {
             return Err(Error::InvalidDataLen(data.len()));
         }
-        self.spi.send_command(cmd, data, false)
+        self.spi.send_command(cmd, data, false)?;
+        self.pending_response = true;
+        Ok(())
     }
 
     /// Read and validate the answer to an `Echo` command.
@@ -461,6 +513,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     fn read_echo(&mut self) -> Result<EchoResponse> {
         let mut buf = [0u8; ECHO_RESPONSE_MAX_LEN];
         let len = self.spi.read_echo(&mut buf)?;
+        self.pending_response = false;
         // An implementation that reports more bytes than it could have written
         // is not trustworthy enough to parse.
         let read = buf.get(..len).ok_or(Error::EchoFailed)?;
@@ -470,12 +523,80 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     fn poll_irq_out(&mut self, timeout: u32) -> Result<()> {
         self.gpio
             .wait_irq_out_falling_edge(timeout)
-            .map_err(|_| Error::PollTimeout)
+            .map_err(|_| Error::ResponseInProgress)
     }
 
+    /// Read a framed response and mark the outstanding command as answered.
+    fn read_data(&mut self) -> Result<ReadResponse> {
+        let response = self.spi.read_data()?;
+        self.pending_response = false;
+        Ok(response)
+    }
+
+    /// Wait for the response of the command in flight, within the deadline of
+    /// the selected configuration.
     fn read(&mut self) -> Result<ReadResponse> {
-        self.poll_irq_out(100)?;
-        self.spi.read_data()
+        self.read_with_timeout(self.response_timeout)
+    }
+
+    fn read_with_timeout(&mut self, timeout: u32) -> Result<ReadResponse> {
+        self.poll_irq_out(timeout)?;
+        self.read_data()
+    }
+
+    /// Host-side deadline, in milliseconds, for the response of a command
+    ///
+    /// Derived from the timing parameters of the selected protocol (`FDT`,
+    /// `FWT` or `RWT`) plus [`RESPONSE_TIMEOUT_MARGIN_MS`], and never shorter
+    /// than [`DEFAULT_RESPONSE_TIMEOUT_MS`], so the host cannot give up on a
+    /// frame wait the chip is still legitimately serving.
+    pub fn response_timeout(&self) -> u32 {
+        self.response_timeout
+    }
+
+    /// Override the host-side deadline for the response of a command
+    ///
+    /// Selecting a protocol recomputes the deadline from that protocol's
+    /// timing parameters, so call this after `protocol_select_*`. Setting a
+    /// deadline shorter than the configured device timeout makes
+    /// [`Error::ResponseInProgress`] the expected outcome of a slow frame.
+    pub fn set_response_timeout(&mut self, timeout: u32) {
+        self.response_timeout = timeout;
+    }
+
+    /// Whether a command has been sent whose response has not been read yet
+    ///
+    /// This is what a host-side timeout leaves behind: the chip is still
+    /// working on the command, so no new command can be sent until the answer
+    /// is drained with [`poll_pending_response`](Self::poll_pending_response)
+    /// or given up with
+    /// [`discard_pending_response`](Self::discard_pending_response).
+    pub fn is_response_pending(&self) -> bool {
+        self.pending_response
+    }
+
+    /// Keep waiting for the response of a command that timed out on the host
+    ///
+    /// This is the recovery path after [`Error::ResponseInProgress`]: it waits
+    /// for the operation already in flight rather than starting a new one, so a
+    /// late answer can never be consumed as the response of a following
+    /// command.
+    pub fn poll_pending_response(&mut self, timeout: u32) -> Result<ReadResponse> {
+        self.read_with_timeout(timeout)
+    }
+
+    /// Give up a pending response and put the SPI interface back in a known
+    /// state
+    ///
+    /// Flushes whatever the chip may still be holding and clears the pending
+    /// state, so commands can be sent again. The answer to the abandoned
+    /// command is lost; prefer
+    /// [`poll_pending_response`](Self::poll_pending_response) when the result
+    /// still matters.
+    pub fn discard_pending_response(&mut self) -> Result<()> {
+        self.spi.flush()?;
+        self.pending_response = false;
+        Ok(())
     }
 
     /// The IDN command gives brief information about the ST25R95 and its revision.
@@ -493,6 +614,9 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     }
 
     fn select_protocol(&mut self, protocol: Protocol, params: impl ProtocolParams) -> Result<()> {
+        // The chip may legitimately spend the configured frame timeout on a
+        // single exchange, so the host deadline follows it.
+        let response_timeout = host_timeout_ms(params.timeout_us());
         let mut data = [0u8; 9];
         data[0] = protocol as u8;
         let (d, data_len) = params.data();
@@ -503,7 +627,9 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         self.send_command(Command::ProtocolSelect, &data[..1 + data_len])?;
 
         let response = self.read()?;
-        response.expect_data_len(0)
+        response.expect_data_len(0)?;
+        self.response_timeout = response_timeout;
+        Ok(())
     }
 
     /// This command selects the RF communication protocol and prepares the ST25R95 for
@@ -514,15 +640,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     ) -> ResultSt25r95ReaderIso15693<S, G> {
         let modulation = params.get_modulation();
         self.select_protocol(Protocol::Iso15693, params)?;
-        Ok(St25r95 {
-            spi: self.spi,
-            gpio: self.gpio,
-            dac_ref: self.dac_ref,
-            dac_guard: self.dac_guard,
-            field: PhantomData::<FieldOn>,
-            role: Reader,
-            protocol: Iso15693(modulation),
-        })
+        Ok(self.transition(Reader, Iso15693(modulation)))
     }
 
     /// This command selects the RF communication protocol and prepares the ST25R95 for
@@ -532,15 +650,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         params: iso14443a::reader::Parameters,
     ) -> ResultSt25r95ReaderIso14443A<S, G> {
         self.select_protocol(Protocol::Iso14443A, params)?;
-        Ok(St25r95 {
-            spi: self.spi,
-            gpio: self.gpio,
-            dac_ref: self.dac_ref,
-            dac_guard: self.dac_guard,
-            field: PhantomData::<FieldOn>,
-            role: Reader,
-            protocol: Iso14443A,
-        })
+        Ok(self.transition(Reader, Iso14443A))
     }
 
     /// This command selects the RF communication protocol and prepares the ST25R95 for
@@ -550,15 +660,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         params: iso14443b::reader::Parameters,
     ) -> ResultSt25r95ReaderIso14443B<S, G> {
         self.select_protocol(Protocol::Iso14443B, params)?;
-        Ok(St25r95 {
-            spi: self.spi,
-            gpio: self.gpio,
-            dac_ref: self.dac_ref,
-            dac_guard: self.dac_guard,
-            field: PhantomData::<FieldOn>,
-            role: Reader,
-            protocol: Iso14443B,
-        })
+        Ok(self.transition(Reader, Iso14443B))
     }
 
     /// This command selects the RF communication protocol and prepares the ST25R95 for
@@ -568,15 +670,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         params: felica::reader::Parameters,
     ) -> ResultSt25r95ReaderFelica<S, G> {
         self.select_protocol(Protocol::FeliCa, params)?;
-        Ok(St25r95 {
-            spi: self.spi,
-            gpio: self.gpio,
-            dac_ref: self.dac_ref,
-            dac_guard: self.dac_guard,
-            field: PhantomData::<FieldOn>,
-            role: Reader,
-            protocol: FeliCa,
-        })
+        Ok(self.transition(Reader, FeliCa))
     }
 
     /// This command selects the RF communication protocol and prepares the ST25R95 for
@@ -586,15 +680,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         params: iso14443a::card_emulation::Parameters,
     ) -> ResultSt25r95CardEmulationIso14443A<S, G> {
         self.select_protocol(Protocol::CardEmulationIso14443A, params)?;
-        Ok(St25r95 {
-            spi: self.spi,
-            gpio: self.gpio,
-            dac_ref: self.dac_ref,
-            dac_guard: self.dac_guard,
-            field: PhantomData::<FieldOn>,
-            role: CardEmulation(false),
-            protocol: Iso14443A,
-        })
+        Ok(self.transition(CardEmulation(false), Iso14443A))
     }
 
     /// This command can be used to detect the presence/absence of an HF field by
@@ -653,15 +739,20 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     }
 
     fn _ack_idle(&mut self) -> Result<WakeUpSource> {
-        let response = self.spi.read_data()?;
+        let response = self.read_data()?;
         response.expect_data_len(1)?;
         WakeUpSource::try_from(response.data[0])
             .map_err(|_| Error::InvalidWakeUpSource(response.data[0]))
     }
 
-    fn _idle(&mut self, params: IdleParams, check_params: bool) -> Result<WakeUpSource> {
+    fn _idle(
+        &mut self,
+        params: IdleParams,
+        check_params: bool,
+        timeout: u32,
+    ) -> Result<WakeUpSource> {
         self._idle_send(params, check_params)?;
-        self.poll_irq_out(100)?;
+        self.poll_irq_out(timeout)?;
         self._ack_idle()
     }
 
@@ -671,8 +762,20 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     /// Caution:
     /// In low power consumption mode the device does not support SPI poll mechanism.
     /// Application has to rely on IRQ_OUT before reading the answer to the Idle command.
-    pub fn idle(&mut self, params: IdleParams) -> Result<WakeUpSource> {
-        self._idle(params, true)
+    ///
+    /// `timeout` is the host-side deadline in milliseconds. An Idle can
+    /// legitimately last seconds, so there is no useful default: pass at least
+    /// as long as the configured wake-up sources can take.
+    /// [`IdleParams::duration_before_timeout`] gives that duration, in
+    /// microseconds, for a timeout wake-up. If the configured wake-up has no
+    /// bound - field or tag detection - use [`idle_async`](Self::idle_async)
+    /// and let the application wait on IRQ_OUT instead.
+    ///
+    /// Returning [`Error::ResponseInProgress`] means the deadline elapsed while
+    /// the chip was still asleep; it stays asleep, and the answer can be
+    /// collected later with [`ack_idle`](Self::ack_idle).
+    pub fn idle(&mut self, params: IdleParams, timeout: u32) -> Result<WakeUpSource> {
+        self._idle(params, true, timeout)
     }
 
     /// Send the Idle command without waiting for the chip to wake up.
@@ -797,12 +900,13 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             max_sleep: 0x01,
             ..Default::default()
         };
-        let wus = self._idle(params, false)?;
+        let idle_timeout = host_timeout_ms(Some(params.duration_before_timeout()));
+        let wus = self._idle(params, false, idle_timeout)?;
         if !wus.tag_detection {
             return Err(Error::CalibTagDetectionFailed);
         }
         params.dac_data.high = 0xFC; // max value
-        let mut wus = self._idle(params, false)?;
+        let mut wus = self._idle(params, false, idle_timeout)?;
         if !wus.timeout {
             return Err(Error::CalibTimeoutFailed);
         }
@@ -812,7 +916,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             } else if wus.tag_detection {
                 params.dac_data.high = adjust_calibration_dac_high(params.dac_data.high, val)?;
             }
-            wus = self._idle(params, false)?;
+            wus = self._idle(params, false, idle_timeout)?;
         }
         if wus.timeout {
             params.dac_data.high = adjust_calibration_dac_high(params.dac_data.high, -0x04)?;
@@ -1045,9 +1149,14 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     }
 
     /// Receive data from the reader through the ST25R95 in Listen mode.
-    /// Will be blocking until data is available.
-    pub fn receive(&mut self) -> Result<ReadResponse> {
-        self.read()
+    ///
+    /// Blocks until the chip reports a command from an external reader or
+    /// `timeout` milliseconds elapse. On timeout it returns
+    /// [`Error::ResponseInProgress`] and the chip stays in Listen mode: call
+    /// again to keep waiting, or [`cancel_listen`](Self::cancel_listen) to
+    /// leave it.
+    pub fn receive(&mut self, timeout: u32) -> Result<ReadResponse> {
+        self.read_with_timeout(timeout)
     }
 
     /// Immediately sends data to the reader using the Load Modulation method.
@@ -1179,7 +1288,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     pub fn cancel_listen(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
         self.send_command(Command::Echo, &[])?;
-        self.poll_irq_out(100)?;
+        self.poll_irq_out(DEFAULT_RESPONSE_TIMEOUT_MS)?;
         match self.read_echo()? {
             EchoResponse::Echo => {}
             EchoResponse::ListenCancelled(response) => match response.expect_data_len(0) {
@@ -1702,6 +1811,39 @@ mod tests {
         }
     }
 
+    /// GPIO mock with a virtual clock.
+    ///
+    /// `delays[n]` is how long, in milliseconds, IRQ_OUT takes to fall for the
+    /// `n`th wait; that wait succeeds only if the driver was willing to wait at
+    /// least that long. Every requested deadline is recorded.
+    struct SequencedGpio<const N: usize> {
+        delays: [u32; N],
+        requested: heapless::Vec<u32, N>,
+    }
+
+    impl<const N: usize> SequencedGpio<N> {
+        fn new(delays: [u32; N]) -> Self {
+            Self {
+                delays,
+                requested: heapless::Vec::new(),
+            }
+        }
+    }
+
+    impl<const N: usize> St25r95Gpio for SequencedGpio<N> {
+        fn irq_in_pulse_low(&mut self) {}
+
+        fn wait_irq_out_falling_edge(&mut self, timeout: u32) -> core::result::Result<(), ()> {
+            let delay = self.delays[self.requested.len()];
+            self.requested.push(timeout).unwrap();
+            if timeout >= delay {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+    }
+
     fn reader<P>(protocol: P) -> St25r95<RecordingSpi, NoopGpio, FieldOn, Reader, P> {
         reader_with_spi(RecordingSpi::default(), protocol)
     }
@@ -1715,6 +1857,8 @@ mod tests {
             gpio: NoopGpio,
             dac_ref: None,
             dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
             field: PhantomData::<FieldOn>,
             role: Reader,
             protocol,
@@ -1737,6 +1881,57 @@ mod tests {
             gpio: NoopGpio,
             dac_ref: None,
             dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
+            field: PhantomData::<FieldOn>,
+            role,
+            protocol,
+        }
+    }
+
+    fn driver_with_gpio<S, G>(spi: S, gpio: G) -> St25r95<S, G, FieldOff, NoRole, NoProtocol> {
+        St25r95 {
+            spi,
+            gpio,
+            dac_ref: None,
+            dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
+            field: PhantomData::<FieldOff>,
+            role: NoRole,
+            protocol: NoProtocol,
+        }
+    }
+
+    fn reader_with_gpio<G, P>(
+        gpio: G,
+        protocol: P,
+    ) -> St25r95<RecordingSpi, G, FieldOn, Reader, P> {
+        St25r95 {
+            spi: RecordingSpi::default(),
+            gpio,
+            dac_ref: None,
+            dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
+            field: PhantomData::<FieldOn>,
+            role: Reader,
+            protocol,
+        }
+    }
+
+    fn card_emulation_with_gpio<G, P>(
+        gpio: G,
+        role: CardEmulation,
+        protocol: P,
+    ) -> St25r95<RecordingSpi, G, FieldOn, CardEmulation, P> {
+        St25r95 {
+            spi: RecordingSpi::default(),
+            gpio,
+            dac_ref: None,
+            dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
             field: PhantomData::<FieldOn>,
             role,
             protocol,
@@ -1744,15 +1939,7 @@ mod tests {
     }
 
     fn unselected_driver<S>(spi: S) -> St25r95<S, NoopGpio, FieldOff, NoRole, NoProtocol> {
-        St25r95 {
-            spi,
-            gpio: NoopGpio,
-            dac_ref: None,
-            dac_guard: 0,
-            field: PhantomData::<FieldOff>,
-            role: NoRole,
-            protocol: NoProtocol,
-        }
+        driver_with_gpio(spi, NoopGpio)
     }
 
     fn assert_wr_reg(spi: &RecordingSpi, data: &[u8]) {
@@ -1805,6 +1992,8 @@ mod tests {
             gpio: NoopGpio,
             dac_ref: None,
             dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
             field: PhantomData::<FieldOn>,
             role: Reader,
             protocol: NoProtocol,
@@ -1818,6 +2007,8 @@ mod tests {
             gpio: NoopGpio,
             dac_ref: None,
             dac_guard: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT_MS,
+            pending_response: false,
             field: PhantomData::<FieldOn>,
             role: Reader,
             protocol: FeliCa,
@@ -2263,6 +2454,164 @@ mod tests {
 
         assert_eq!(reader.calibrate_tag_detector(), Ok(0x00));
         assert_eq!(reader.dac_ref, Some(0x00));
+    }
+
+    #[test]
+    pub fn test_host_timeout_ms_derivation() {
+        // No configured device timeout: the default deadline applies.
+        assert_eq!(host_timeout_ms(None), DEFAULT_RESPONSE_TIMEOUT_MS);
+        assert_eq!(host_timeout_ms(Some(0.0)), DEFAULT_RESPONSE_TIMEOUT_MS);
+        assert_eq!(host_timeout_ms(Some(10_000.0)), DEFAULT_RESPONSE_TIMEOUT_MS);
+
+        // Just below, at, and above the default 100 ms deadline the host waits
+        // for the device timeout plus its margin.
+        assert_eq!(host_timeout_ms(Some(99_000.0)), 150);
+        assert_eq!(host_timeout_ms(Some(100_000.0)), 151);
+        assert_eq!(host_timeout_ms(Some(101_000.0)), 152);
+
+        // Multi-second frame waits are honoured, and the arithmetic saturates.
+        assert_eq!(host_timeout_ms(Some(3_000_000.0)), 3_051);
+        assert_eq!(host_timeout_ms(Some(f32::MAX)), u32::MAX);
+    }
+
+    #[test]
+    pub fn test_protocol_select_derives_the_host_deadline() {
+        // A Type B FWT of about 154 ms, well above the default host wait.
+        let fwt = iso14443b::reader::FWT::new(9, 0, 0).unwrap();
+        assert!(fwt.us() > 100_000.0);
+        let expected = host_timeout_ms(Some(fwt.us()));
+
+        let nfc = driver_with_gpio(RecordingSpi::default(), SequencedGpio::new([0, 200]));
+        let mut reader = nfc
+            .protocol_select_iso14443b(iso14443b::reader::Parameters::default().fwt(fwt))
+            .unwrap();
+
+        assert_eq!(reader.response_timeout(), expected);
+        // The tag answers after 200 ms: a fixed 100 ms host wait would have
+        // abandoned a frame the chip was still serving.
+        assert!(reader.send_receive(&[0x05]).is_ok());
+        assert_eq!(
+            reader.gpio.requested.as_slice(),
+            &[DEFAULT_RESPONSE_TIMEOUT_MS, expected]
+        );
+    }
+
+    #[test]
+    pub fn test_multi_second_frame_wait_is_honoured() {
+        // FeliCa RWT at the largest allowed exponent: about 4.9 s.
+        let rwt = felica::reader::RWT::new(MAX_PP, 0).unwrap();
+        let expected = host_timeout_ms(Some(rwt.us()));
+        assert_eq!(expected, 5_000);
+
+        let nfc = driver_with_gpio(RecordingSpi::default(), SequencedGpio::new([0, 4_900]));
+        let mut reader = nfc
+            .protocol_select_felica(felica::reader::Parameters::default().rwt(rwt))
+            .unwrap();
+
+        assert_eq!(reader.response_timeout(), expected);
+        assert!(reader.send_receive(&[0x00]).is_ok());
+    }
+
+    #[test]
+    pub fn test_default_deadline_boundaries() {
+        // Just below, at, and above the default deadline.
+        for (delay, answered) in [(99, true), (100, true), (101, false)] {
+            let mut reader = reader_with_gpio(SequencedGpio::new([delay]), Iso14443A);
+
+            assert_eq!(reader.send_receive(&[0x26]).is_ok(), answered);
+            assert_eq!(
+                reader.gpio.requested.as_slice(),
+                &[DEFAULT_RESPONSE_TIMEOUT_MS]
+            );
+        }
+    }
+
+    #[test]
+    pub fn test_host_timeout_keeps_the_operation_and_blocks_new_commands() {
+        // The chip answers after 3 s while the host waits the default 100 ms.
+        let mut reader = reader_with_gpio(SequencedGpio::new([3_000, 0, 0]), Iso14443A);
+
+        assert_eq!(reader.send_receive(&[0x26]), Err(Error::ResponseInProgress));
+        assert!(reader.is_response_pending());
+
+        // A second command would race the answer to the first, so it never
+        // reaches the chip and cannot consume the late response.
+        assert_eq!(reader.send_receive(&[0x26]), Err(Error::ResponseInProgress));
+        assert_eq!(reader.gpio.requested.len(), 1);
+
+        // Waiting longer completes the operation that was already in flight.
+        let response = reader.poll_pending_response(5_000).unwrap();
+        assert_eq!(response.code, 0);
+        assert!(!reader.is_response_pending());
+        assert!(reader.send_receive(&[0x26]).is_ok());
+    }
+
+    #[test]
+    pub fn test_discard_pending_response_unblocks_the_driver() {
+        let mut reader = reader_with_gpio(SequencedGpio::new([3_000, 0]), Iso14443A);
+
+        assert_eq!(reader.send_receive(&[0x26]), Err(Error::ResponseInProgress));
+        assert!(reader.is_response_pending());
+
+        assert_eq!(reader.discard_pending_response(), Ok(()));
+        assert!(!reader.is_response_pending());
+        assert!(reader.send_receive(&[0x26]).is_ok());
+    }
+
+    #[test]
+    pub fn test_idle_uses_the_caller_supplied_deadline() {
+        // A deadline shorter than the configured sleep leaves the chip asleep.
+        let mut nfc = driver_with_gpio(
+            WakeSequenceSpi::new([timeout_wake()]),
+            SequencedGpio::new([3_000]),
+        );
+
+        assert_eq!(
+            nfc.idle(IdleParams::default(), DEFAULT_RESPONSE_TIMEOUT_MS),
+            Err(Error::ResponseInProgress)
+        );
+        assert!(nfc.is_response_pending());
+
+        // The wake-up answer is still collectable once it arrives.
+        assert_eq!(nfc.ack_idle().map(|wus| wus.timeout), Ok(true));
+        assert!(!nfc.is_response_pending());
+        assert_eq!(
+            nfc.gpio.requested.as_slice(),
+            &[DEFAULT_RESPONSE_TIMEOUT_MS]
+        );
+
+        // A deadline that covers the sleep returns the wake-up source directly.
+        let mut nfc = driver_with_gpio(
+            WakeSequenceSpi::new([timeout_wake()]),
+            SequencedGpio::new([3_000]),
+        );
+
+        assert_eq!(
+            nfc.idle(IdleParams::default(), 5_000)
+                .map(|wus| wus.timeout),
+            Ok(true)
+        );
+        assert!(!nfc.is_response_pending());
+    }
+
+    #[test]
+    pub fn test_receive_timeout_leaves_the_card_able_to_cancel_listen() {
+        // No reader command arrives within the deadline.
+        let mut card = card_emulation_with_gpio(
+            SequencedGpio::new([3_000, 0]),
+            CardEmulation(true),
+            Iso14443A,
+        );
+
+        assert_eq!(
+            card.receive(DEFAULT_RESPONSE_TIMEOUT_MS),
+            Err(Error::ResponseInProgress)
+        );
+
+        // Nothing was sent, so the card can still leave Listen mode.
+        assert!(!card.is_response_pending());
+        assert_eq!(card.cancel_listen(), Ok(()));
+        assert!(!card.role.0);
     }
 
     #[test]

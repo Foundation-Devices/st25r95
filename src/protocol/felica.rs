@@ -156,6 +156,10 @@ pub mod reader {
     }
 
     impl ProtocolParams for Parameters {
+        fn timeout_us(&self) -> Option<f32> {
+            self.rwt.map(|rwt| rwt.us())
+        }
+
         fn data(self) -> ([u8; 8], usize) {
             let mut parameters = [0; 8];
             let mut param_byte = 0;

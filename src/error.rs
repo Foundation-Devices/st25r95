@@ -32,9 +32,10 @@
 //! ```rust,ignore
 //! match nfc.send_receive(&cmd) {
 //!     Ok(response) => process_response(response),
-//!     Err(Error::PollTimeout) => {
-//!         // Retry operation
-//!         nfc.send_receive(&cmd)
+//!     Err(Error::ResponseInProgress) => {
+//!         // The chip is still running the command: wait longer for the same
+//!         // operation instead of sending a new one.
+//!         nfc.poll_pending_response(1_000)
 //!     },
 //!     Err(Error::FrameTimeoutOrNoTag) => {
 //!         // No tag present, wait for tag
@@ -99,7 +100,8 @@ use derive_more::From;
 ///
 /// ## Error Recovery Guidelines
 ///
-/// **Retry-worthy errors**: PollTimeout, FrameTimeoutOrNoTag, CrcError
+/// **Retry-worthy errors**: FrameTimeoutOrNoTag, CrcError
+/// **In-progress operations**: ResponseInProgress (drain or discard it first)
 /// **Configuration errors**: Invalid parameters, CalibrationNeeded
 /// **Hardware errors**: Spi, CommunicationError (may require reset)
 /// **User errors**: Invalid command sequences, parameter ranges
@@ -110,6 +112,16 @@ pub enum Error {
     UTF8(core::str::Utf8Error),
     Vec,
     PollTimeout,
+
+    /// The host stopped waiting before the ST25R95 answered
+    ///
+    /// The configured host deadline elapsed while IRQ_OUT was still high. The
+    /// operation is not cancelled: the chip is still running it and will
+    /// eventually answer. Do not send a new command, which would race that
+    /// answer; wait longer with `poll_pending_response`, or give the answer up
+    /// with `discard_pending_response`.
+    ResponseInProgress,
+
     IdentificationError,
     InternalBufferOverflow,
 

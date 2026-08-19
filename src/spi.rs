@@ -167,7 +167,8 @@ pub trait St25r95Spi {
     /// - `Err(Error::SpiError)`: Error occurred during flush
     ///
     /// ## When to Use
-    /// - After communication timeouts
+    /// - After communication timeouts, when the driver gives up a pending response
+    ///   through `St25r95::discard_pending_response`
     /// - Before retrying failed operations
     /// - When transitioning between different operation modes
     /// - As part of error recovery procedures

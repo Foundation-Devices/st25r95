@@ -162,6 +162,18 @@ pub(crate) trait ProtocolParams {
     /// - Array of up to 8 parameter bytes
     /// - Actual number of valid bytes in the array
     fn data(self) -> ([u8; 8], usize);
+
+    /// Longest the chip can spend on one frame with these parameters, in
+    /// microseconds
+    ///
+    /// This is the configured device-side timeout - `FDT` for Type A, `FWT`
+    /// for Type B, `RWT` for FeliCa - which the driver turns into a host-side
+    /// deadline so it never gives up before the chip does. `None` means the
+    /// protocol has no configurable frame timeout, and the default host
+    /// deadline applies.
+    fn timeout_us(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// Parameter structure for FieldOff protocol

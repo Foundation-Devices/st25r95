@@ -84,7 +84,11 @@ pub trait St25r95Gpio {
     /// attention.
     ///
     /// ## Parameters
-    /// - `timeout`: Maximum time to wait in milliseconds
+    /// - `timeout`: Maximum time to wait in milliseconds. The driver derives it from the
+    ///   timeout configured on the chip for the operation in flight, so an implementation
+    ///   must honour the full duration rather than capping it; returning early makes the
+    ///   driver report `Error::ResponseInProgress` for an operation the chip is still
+    ///   legitimately serving.
     ///
     /// ## Returns
     /// - `Ok(())`: Falling edge detected within timeout period
