@@ -79,6 +79,19 @@ pub trait St25r95Spi {
     /// - `data`: Optional data payload (can be empty)
     /// - `sod`: Start of Data flag - set to `true` for first packet in a sequence
     ///
+    /// ## Payload Length
+    ///
+    /// The wire format is `<CMD><Len><Data>` with a **one-byte** `Len`, so a
+    /// packet can carry at most [`MAX_COMMAND_DATA_LEN`](crate::MAX_COMMAND_DATA_LEN)
+    /// (255) payload bytes. The driver rejects longer payloads before calling
+    /// this method, so a conforming caller never exceeds that limit; an
+    /// implementation must still return `Err(Error::InvalidDataLen)` rather
+    /// than narrowing the length with a truncating cast, because a truncated
+    /// length byte changes the command the chip executes while the full
+    /// payload is still clocked out. When `sod` is set, the extra byte(s) the
+    /// implementation prepends count towards the same one-byte budget and must
+    /// be checked the same way, in release builds as well as debug builds.
+    ///
     /// ## Returns
     /// - `Ok(())`: Command transmitted successfully
     /// - `Err(Error::SpiError)`: SPI communication error

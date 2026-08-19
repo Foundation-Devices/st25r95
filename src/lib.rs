@@ -269,6 +269,16 @@ type ResultSt25r95CardEmulationIso14443A<S, G> =
 /// Maximum buffer size for SPI communication with the ST25R95 chip
 pub const MAX_BUFFER_SIZE: usize = 530;
 
+/// Maximum payload of a single host-to-chip command
+///
+/// Commands are sent to the ST25R95 as `<CMD><Len><Data>` (datasheet DS12807
+/// §4.2) where `Len` is a single byte, so no command can carry more than 255
+/// payload bytes. Every public method that forwards a caller-provided slice
+/// rejects a longer payload with [`Error::InvalidDataLen`] before reaching the
+/// [`St25r95Spi`] implementation, so an implementation never has to decide
+/// what to do with a length it cannot encode.
+pub const MAX_COMMAND_DATA_LEN: usize = u8::MAX as usize;
+
 /// Main driver struct for the ST25R95 NFC transceiver chip
 ///
 /// This struct uses a type-state pattern to ensure correct usage at compile time.
@@ -359,7 +369,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOff, NoRole, NoProtocol> 
     /// ST25R95.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[], false)?;
+        self.send_command(Command::Echo, &[])?;
         self.poll_irq_out(100)?;
         let response = self.spi.read_data()?;
         response.expect_data_len(0)
@@ -384,7 +394,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, R: Default, P: Default> St25r95<S, G, FieldO
     /// ST25R95.
     pub fn echo(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[], false)?;
+        self.send_command(Command::Echo, &[])?;
         self.poll_irq_out(100)?;
         let response = self.spi.read_data()?;
         response.expect_data_len(0)
@@ -397,6 +407,21 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         // should be in Power-up state
         self.gpio.irq_in_pulse_low();
         Ok(())
+    }
+
+    /// Send a command packet after checking that the ST25R95 can encode its
+    /// length.
+    ///
+    /// The host-to-chip wire format has a one-byte length field, so a payload
+    /// longer than [`MAX_COMMAND_DATA_LEN`] cannot be announced to the chip.
+    /// Rejecting it here means every [`St25r95Spi`] implementation is handed a
+    /// slice it can encode, instead of having to truncate the length itself and
+    /// desynchronize the command.
+    fn send_command(&mut self, cmd: Command, data: &[u8]) -> Result<()> {
+        if data.len() > MAX_COMMAND_DATA_LEN {
+            return Err(Error::InvalidDataLen(data.len()));
+        }
+        self.spi.send_command(cmd, data, false)
     }
 
     fn poll_irq_out(&mut self, timeout: u32) -> Result<()> {
@@ -412,7 +437,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
 
     /// The IDN command gives brief information about the ST25R95 and its revision.
     pub fn idn(&mut self) -> Result<(heapless::String<13>, u16)> {
-        self.spi.send_command(Command::Idn, &[], false)?;
+        self.send_command(Command::Idn, &[])?;
 
         let response = self.read()?;
         response.expect_data_len(15)?;
@@ -432,8 +457,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
             data[1..1 + data_len].copy_from_slice(&d[..data_len]);
         }
 
-        self.spi
-            .send_command(Command::ProtocolSelect, &data[..1 + data_len], false)?;
+        self.send_command(Command::ProtocolSelect, &data[..1 + data_len])?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -539,16 +563,12 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     /// turned ON by the reader.
     pub fn poll_field(&mut self, wff: Option<WaitForField>) -> Result<bool> {
         match wff {
-            None => self.spi.send_command(Command::PollField, &[], false)?,
+            None => self.send_command(Command::PollField, &[])?,
             Some(WaitForField {
                 apparance,
                 presc,
                 timer,
-            }) => self.spi.send_command(
-                Command::PollField,
-                &[apparance as u8, presc, timer],
-                false,
-            )?,
+            }) => self.send_command(Command::PollField, &[apparance as u8, presc, timer])?,
         }
 
         let response = self.read()?;
@@ -585,8 +605,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
                 }
             }
         }
-        self.spi
-            .send_command(Command::Idle, &params.data(), false)?;
+        self.send_command(Command::Idle, &params.data())?;
         Ok(())
     }
 
@@ -663,8 +682,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         } else {
             2
         };
-        self.spi
-            .send_command(Command::WrReg, &data[..data_len], false)?;
+        self.send_command(Command::WrReg, &data[..data_len])?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -679,7 +697,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
         data[0] = reg.read_addr();
         data[1] = 0x01;
         data[2] = 0x00;
-        self.spi.send_command(Command::RdReg, &data, false)?;
+        self.send_command(Command::RdReg, &data)?;
 
         let response = self.read()?;
         response.expect_data_len(1)?;
@@ -778,8 +796,12 @@ impl<S: St25r95Spi, G: St25r95Gpio, P: Default> St25r95<S, G, FieldOn, Reader, P
     /// This returns the raw command response. Protocol operations can validly surface
     /// status bytes that callers may want to inspect themselves, so this method does
     /// not call [`ReadResponse::ensure_ok`].
+    ///
+    /// `data` must be at most [`MAX_COMMAND_DATA_LEN`] bytes long: the command
+    /// announces its payload with a single length byte, so a longer slice is
+    /// rejected with [`Error::InvalidDataLen`] before anything is sent.
     pub fn send_receive(&mut self, data: &[u8]) -> Result<ReadResponse> {
-        self.spi.send_command(Command::SendRecv, data, false)?;
+        self.send_command(Command::SendRecv, data)?;
         self.read()
     }
 
@@ -971,7 +993,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     /// must be used to exit the Listening mode prior to sending a new command to the
     /// ST25R95.
     pub fn listen(&mut self) -> Result<()> {
-        self.spi.send_command(Command::Listen, &[], false)?;
+        self.send_command(Command::Listen, &[])?;
 
         let response = self.read()?;
         response.expect_data_len(0)?;
@@ -986,8 +1008,12 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     }
 
     /// Immediately sends data to the reader using the Load Modulation method.
+    ///
+    /// `data` must be at most [`MAX_COMMAND_DATA_LEN`] bytes long: the command
+    /// announces its payload with a single length byte, so a longer slice is
+    /// rejected with [`Error::InvalidDataLen`] before anything is sent.
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.spi.send_command(Command::Send, data, false)?;
+        self.send_command(Command::Send, data)?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -1062,15 +1088,14 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
             return Err(Error::InvalidCascadeLevelFilterCount(uid_count));
         }
         let data_len = 3 + uid_count * core::mem::size_of::<UID>();
-        self.spi
-            .send_command(Command::ACFilter, &data[..data_len], false)?;
+        self.send_command(Command::ACFilter, &data[..data_len])?;
 
         let response = self.read()?;
         response.expect_data_len(0)
     }
 
     fn ac_filter_state(&mut self, data: &[u8]) -> Result<AntiColState> {
-        self.spi.send_command(Command::ACFilter, data, false)?;
+        self.send_command(Command::ACFilter, data)?;
 
         let response = self.read()?;
         response.expect_data_len(1)?;
@@ -1091,8 +1116,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
 
     /// This command sets the Anti-Collision Filter state in Type A card emulation mode.
     pub fn set_anti_collision_state(&mut self, state: AntiColState) -> Result<()> {
-        self.spi
-            .send_command(Command::ACFilter, &[state as u8], false)?;
+        self.send_command(Command::ACFilter, &[state as u8])?;
 
         let response = self.read()?;
         response.expect_data_len(0)
@@ -1107,7 +1131,7 @@ impl<S: St25r95Spi, G: St25r95Gpio> St25r95<S, G, FieldOn, CardEmulation, Iso144
     /// session timeout) before sending another command.
     pub fn cancel_listen(&mut self) -> Result<()> {
         self.spi.poll(PollFlags::CAN_SEND)?;
-        self.spi.send_command(Command::Echo, &[], false)?;
+        self.send_command(Command::Echo, &[])?;
         self.poll_irq_out(100)?;
         let response = self.spi.read_data()?;
         match response.expect_data_len(0) {
@@ -1415,7 +1439,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSpi {
         command: Option<Command>,
-        data: heapless::Vec<u8, 16>,
+        data: heapless::Vec<u8, MAX_BUFFER_SIZE>,
         sod: bool,
         response_code: u8,
         response_data: heapless::Vec<u8, MAX_BUFFER_SIZE>,
@@ -1765,6 +1789,46 @@ mod tests {
 
         assert_eq!(response.code, 0x87);
         assert!(response.data.is_empty());
+    }
+
+    #[test]
+    pub fn test_send_receive_length_boundaries() {
+        // An empty payload and the largest encodable payload are accepted.
+        let mut nfc = reader(Iso14443A);
+        assert!(nfc.send_receive(&[]).is_ok());
+        assert!(nfc.spi.data.is_empty());
+        assert!(nfc.send_receive(&[0xAA; MAX_COMMAND_DATA_LEN]).is_ok());
+        assert_eq!(nfc.spi.data.len(), MAX_COMMAND_DATA_LEN);
+
+        // One byte more cannot be announced by the command's one-byte length
+        // field. The comparison is made on the whole slice length, so it holds
+        // for any longer payload up to `usize::MAX`, and nothing is sent.
+        for len in [MAX_COMMAND_DATA_LEN + 1, 528, MAX_BUFFER_SIZE] {
+            let mut nfc = reader(Iso14443A);
+            assert_eq!(
+                nfc.send_receive(&[0xAA; MAX_BUFFER_SIZE][..len]),
+                Err(Error::InvalidDataLen(len))
+            );
+            assert_eq!(nfc.spi.command, None);
+        }
+    }
+
+    #[test]
+    pub fn test_card_emulation_send_length_boundaries() {
+        let mut card = card_emulation(Iso14443A);
+        assert_eq!(card.send(&[]), Ok(()));
+        assert!(card.spi.data.is_empty());
+        assert_eq!(card.send(&[0xAA; MAX_COMMAND_DATA_LEN]), Ok(()));
+        assert_eq!(card.spi.data.len(), MAX_COMMAND_DATA_LEN);
+
+        for len in [MAX_COMMAND_DATA_LEN + 1, 528, MAX_BUFFER_SIZE] {
+            let mut card = card_emulation(Iso14443A);
+            assert_eq!(
+                card.send(&[0xAA; MAX_BUFFER_SIZE][..len]),
+                Err(Error::InvalidDataLen(len))
+            );
+            assert_eq!(card.spi.command, None);
+        }
     }
 
     #[test]
