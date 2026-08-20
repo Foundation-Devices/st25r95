@@ -180,6 +180,44 @@ pub enum Error {
     InvalidAntiColState(u8),
     InvalidCascadeLevelFilterCount(usize),
 
+    /// An Idle configuration named no wake-up source
+    ///
+    /// The chip would enter low power with nothing able to bring it back.
+    IdleNoWakeUpSource,
+
+    /// An Idle configuration asked for field and tag detection together
+    ///
+    /// Field detection watches for a field the chip is not generating; tag
+    /// detection generates one. The chip cannot do both in the same Idle.
+    IdleConflictingWakeUpSources,
+
+    /// Field detection was requested without the resources it needs
+    ///
+    /// `EnterCtrl` must enable both `field_detect_aux_enabled` and
+    /// `field_detector_enabled`. With only the latter the chip enters a state
+    /// that an IRQ_IN pulse, a Reset and an IDN do not recover, which on a
+    /// board without independent NFC rail control means a full power cycle.
+    IdleFieldDetectionIncomplete,
+
+    /// Tag detection was requested without the resources it needs
+    ///
+    /// `WuCtrl` must keep the reference current and both oscillators
+    /// available, otherwise the chip cannot raise and measure the field
+    /// during a detection trial.
+    IdleTagDetectionIncomplete,
+
+    /// Hibernate was requested together with a source that cannot wake it
+    ///
+    /// Hibernate stops the low-frequency oscillator, so the timer, the field
+    /// detector and the tag detector all stop with it. Only a low pulse on
+    /// IRQ_IN leaves hibernate.
+    IdleHibernateNeedsIrqIn,
+
+    /// One control word asked for hibernate and sleep at once
+    ///
+    /// The two are alternative low-power states, not resources to combine.
+    IdleConflictingPowerStates,
+
     EchoFailed,
 }
 

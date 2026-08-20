@@ -99,7 +99,17 @@ mod spi;
 
 pub use {
     crate::{
-        command::{Command, CtrlResConf, DacData, IdleParams, LFOFreq, WaitForField, WakeUpSource},
+        command::{
+            Command,
+            CtrlResConf,
+            DacData,
+            IdleParams,
+            LFOFreq,
+            WaitForField,
+            WakeUpSource,
+            MAX_MAX_SLEEP,
+            MIN_MAX_SLEEP,
+        },
         control::{Control, PollFlags},
         protocol::*,
         register::{
@@ -733,6 +743,9 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     }
 
     fn _idle_send(&mut self, mut params: IdleParams, check_params: bool) -> Result<()> {
+        // Before anything reaches the bus: an incoherent Idle can leave the
+        // chip in a state only a power cycle clears.
+        params.validate()?;
         if check_params && params.wus.tag_detection {
             match self.dac_ref {
                 None => return Err(Error::CalibrationNeeded),
@@ -794,6 +807,11 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     /// Returning [`Error::ResponseInProgress`] means the deadline elapsed while
     /// the chip was still asleep; it stays asleep, and the answer can be
     /// collected later with [`ack_idle`](Self::ack_idle).
+    ///
+    /// `params` is checked by [`IdleParams::validate`] first, so a
+    /// configuration the chip could not wake up from is refused before
+    /// anything reaches the SPI bus. Building it with one of the
+    /// [`IdleParams`] constructors keeps that check trivially satisfied.
     pub fn idle(&mut self, params: IdleParams, timeout: u32) -> Result<WakeUpSource> {
         self._idle(params, true, timeout)
     }
@@ -807,8 +825,9 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
     /// in the chip's SPI buffer, which the next SPI command may read instead of
     /// its own response.
     ///
-    /// As with [`idle`](Self::idle), passing a [`WakeUpSource`] with
-    /// `tag_detection: true` requires a prior successful
+    /// As with [`idle`](Self::idle), `params` is checked by
+    /// [`IdleParams::validate`] before anything is sent, and passing a
+    /// [`WakeUpSource`] with `tag_detection: true` requires a prior successful
     /// [`calibrate_tag_detector`](Self::calibrate_tag_detector) call.
     pub fn idle_async(&mut self, params: IdleParams) -> Result<()> {
         self._idle_send(params, true)
@@ -881,45 +900,7 @@ impl<S: St25r95Spi, G: St25r95Gpio, F, R, P> St25r95<S, G, F, R, P> {
 
     /// Calibrate the tag detector as wake-up source by an iterrative process.
     pub fn calibrate_tag_detector(&mut self) -> Result<u8> {
-        let mut params = IdleParams {
-            wus: WakeUpSource {
-                lfo_freq: LFOFreq::KHz32,
-                ss_low_pulse: false,
-                irq_in_low_pulse: false,
-                field_detection: false,
-                tag_detection: true,
-                timeout: true,
-            },
-            enter_ctrl: CtrlResConf {
-                field_detect_aux_enabled: false,
-                field_detector_enabled: false,
-                iref_enabled: false,
-                dac_comp_high: true,
-                lfo_enabled: true,
-                hfo_enabled: false,
-                vdda_enabled: false,
-                hibernate_state_enabled: false,
-                sleep_state_enabled: true,
-            },
-            wu_ctrl: CtrlResConf {
-                field_detect_aux_enabled: false,
-                field_detector_enabled: false,
-                iref_enabled: true,
-                dac_comp_high: true,
-                lfo_enabled: true,
-                hfo_enabled: true,
-                vdda_enabled: true,
-                hibernate_state_enabled: false,
-                sleep_state_enabled: false,
-            },
-            wu_period: 0,
-            dac_data: DacData {
-                low: 0x00,
-                high: 0x00,
-            },
-            max_sleep: 0x01,
-            ..Default::default()
-        };
+        let mut params = IdleParams::tag_detector_calibration();
         let idle_timeout = host_timeout_ms(Some(params.duration_before_timeout()));
         let wus = self._idle(params, false, idle_timeout)?;
         if !wus.tag_detection {
@@ -2621,6 +2602,68 @@ mod tests {
     }
 
     #[test]
+    pub fn test_invalid_idle_never_reaches_the_bus() {
+        // The combination the documentation used to suggest: field detection
+        // asked for on top of a default that leaves EnterCtrl empty.
+        let params = IdleParams {
+            wus: WakeUpSource {
+                field_detection: true,
+                ..Default::default()
+            },
+            enter_ctrl: CtrlResConf::NONE,
+            ..Default::default()
+        };
+
+        let mut nfc = unselected_driver(RecordingSpi::default());
+        assert_eq!(
+            nfc.idle(params, DEFAULT_RESPONSE_TIMEOUT_MS),
+            Err(Error::IdleFieldDetectionIncomplete)
+        );
+        assert_eq!(nfc.spi.command, None);
+        assert!(!nfc.is_response_pending());
+
+        // The deferred path refuses the same configuration.
+        let mut nfc = unselected_driver(RecordingSpi::default());
+        assert_eq!(
+            nfc.idle_async(params),
+            Err(Error::IdleFieldDetectionIncomplete)
+        );
+        assert_eq!(nfc.spi.command, None);
+
+        // A sleep with nothing to end it is refused before the SPI transfer,
+        // not discovered once the chip has stopped answering.
+        let mut nfc = unselected_driver(RecordingSpi::default());
+        assert_eq!(
+            nfc.idle(IdleParams::default(), DEFAULT_RESPONSE_TIMEOUT_MS),
+            Err(Error::IdleNoWakeUpSource)
+        );
+        assert_eq!(nfc.spi.command, None);
+    }
+
+    #[test]
+    pub fn test_idle_sends_the_validated_command() {
+        let mut nfc = driver_with_gpio(WakeSequenceSpi::new([]), NoopGpio);
+        // Tag detection needs a calibration before the driver will send it.
+        assert_eq!(
+            nfc.idle(
+                IdleParams::tag_detection(0x20, 0x08).unwrap(),
+                DEFAULT_RESPONSE_TIMEOUT_MS
+            ),
+            Err(Error::CalibrationNeeded)
+        );
+
+        // Field detection needs no calibration: the command goes out as the
+        // constructor built it.
+        let mut nfc = unselected_driver(RecordingSpi::default());
+        assert!(nfc.idle_async(IdleParams::field_detection()).is_ok());
+        assert_eq!(nfc.spi.command, Some(Command::Idle));
+        assert_eq!(
+            nfc.spi.data.as_slice(),
+            &[0x0C, 0x01, 0x42, 0x38, 0x00, 0x18, 0x00, 0x20, 0x60, 0x60, 0x74, 0x84, 0x3F, 0x00]
+        );
+    }
+
+    #[test]
     pub fn test_idle_uses_the_caller_supplied_deadline() {
         // A deadline shorter than the configured sleep leaves the chip asleep.
         let mut nfc = driver_with_gpio(
@@ -2628,8 +2671,10 @@ mod tests {
             SequencedGpio::new([3_000]),
         );
 
+        let params = IdleParams::timeout(LFOFreq::KHz32, 0x20, 0x08).unwrap();
+
         assert_eq!(
-            nfc.idle(IdleParams::default(), DEFAULT_RESPONSE_TIMEOUT_MS),
+            nfc.idle(params, DEFAULT_RESPONSE_TIMEOUT_MS),
             Err(Error::ResponseInProgress)
         );
         assert!(nfc.is_response_pending());
@@ -2648,11 +2693,7 @@ mod tests {
             SequencedGpio::new([3_000]),
         );
 
-        assert_eq!(
-            nfc.idle(IdleParams::default(), 5_000)
-                .map(|wus| wus.timeout),
-            Ok(true)
-        );
+        assert_eq!(nfc.idle(params, 5_000).map(|wus| wus.timeout), Ok(true));
         assert!(!nfc.is_response_pending());
     }
 

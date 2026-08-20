@@ -38,6 +38,8 @@
 //! All commands are sent through the SPI interface using the `St25r95Spi` trait.
 //! The numeric values correspond to the command bytes sent to the ST25R95.
 
+use crate::Error;
+
 /// ST25R95 Command Enumeration
 ///
 /// Represents all supported commands for the ST25R95 NFC transceiver.
@@ -410,18 +412,15 @@ impl TryFrom<u8> for LFOFreq {
 /// **Tag detection requires calibration** using `calibrate_tag_detector()`:
 ///
 /// ```rust
-/// # use st25r95::{IdleParams, WakeUpSource};
-/// // Calibrate first with `St25r95::calibrate_tag_detector`, then use tag
-/// // detection as a wake-up source.
-/// let params = IdleParams {
-///     wus: WakeUpSource {
-///         tag_detection: true,
-///         timeout: true, // Always enable timeout with tag detection
-///         ..Default::default()
-///     },
-///     ..Default::default()
-/// };
-/// assert!(params.wus.tag_detection);
+/// # use st25r95::IdleParams;
+/// // Calibrate first with `St25r95::calibrate_tag_detector`; the constructor
+/// // enables the resources a detection trial needs. Adding the timeout makes
+/// // the chip report back even when no tag ever arrives.
+/// let mut params = IdleParams::tag_detection(0x20, 0x08)?;
+/// params.wus.timeout = true;
+/// assert!(params.wus.tag_detection && params.wus.timeout);
+/// # params.validate()?;
+/// # Ok::<(), st25r95::Error>(())
 /// ```
 ///
 /// ## Power Consumption Impact
@@ -434,27 +433,27 @@ impl TryFrom<u8> for LFOFreq {
 ///
 /// ## Recommended Configurations
 ///
+/// A wake-up source is only half of a working Idle: the chip also has to be
+/// told which circuits to keep powered while it sleeps, and the two have to
+/// agree. Build the pair with the [`IdleParams`] constructors rather than by
+/// hand - a field-detection source without its EnterCtrl resources, for
+/// instance, is the combination that leaves the chip needing a power cycle.
+///
 /// ```rust
-/// # use st25r95::WakeUpSource;
+/// # use st25r95::IdleParams;
 /// // Host-controlled wake-up (lowest power)
-/// let host = WakeUpSource {
-///     irq_in_low_pulse: true,
-///     ..Default::default()
-/// };
+/// let host = IdleParams::hibernate();
 ///
 /// // Field detection for reader collision avoidance
-/// let field = WakeUpSource {
-///     field_detection: true,
-///     ..Default::default()
-/// };
+/// let field = IdleParams::field_detection();
 ///
 /// // Tag detection with timeout failsafe
-/// let tag = WakeUpSource {
-///     tag_detection: true,
-///     timeout: true,
-///     ..Default::default()
-/// };
-/// assert!(host.irq_in_low_pulse && field.field_detection && tag.tag_detection);
+/// let tag = IdleParams::tag_detection(0x20, 0x08)?;
+///
+/// assert!(host.wus.irq_in_low_pulse);
+/// assert!(field.wus.field_detection && field.enter_ctrl.field_detect_aux_enabled);
+/// assert!(tag.wus.tag_detection && tag.enter_ctrl.lfo_enabled);
+/// # Ok::<(), st25r95::Error>(())
 /// ```
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct WakeUpSource {
@@ -582,6 +581,26 @@ impl Default for CtrlResConf {
     }
 }
 
+impl CtrlResConf {
+    /// Every resource off.
+    ///
+    /// [`CtrlResConf::default`] keeps the hibernate state enabled, which is
+    /// the right answer for one Idle configuration and the wrong one for the
+    /// rest, so the [`IdleParams`] constructors start from this and name only
+    /// the resources they need.
+    pub const NONE: Self = Self {
+        field_detect_aux_enabled: false,
+        field_detector_enabled: false,
+        iref_enabled: false,
+        dac_comp_high: false,
+        lfo_enabled: false,
+        hfo_enabled: false,
+        vdda_enabled: false,
+        hibernate_state_enabled: false,
+        sleep_state_enabled: false,
+    };
+}
+
 impl From<CtrlResConf> for u16 {
     fn from(ctrl: CtrlResConf) -> Self {
         (ctrl.field_detect_aux_enabled as u16) << 14
@@ -596,7 +615,7 @@ impl From<CtrlResConf> for u16 {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct DacData {
     /// Lower compare value for tag detection.
     /// This value must be set to 0x00 during tag detection calibration.
@@ -642,34 +661,18 @@ pub struct DacData {
 /// #     mock::{MockGpio, MockSpi},
 /// #     IdleParams,
 /// #     St25r95,
-/// #     WakeUpSource,
 /// # };
 /// # let mut nfc = St25r95::new(MockSpi::default(), MockGpio)?;
 /// // Simple idle with IRQ_IN wake-up, waiting up to 5 s for the host pulse
-/// let params = IdleParams {
-///     wus: WakeUpSource {
-///         irq_in_low_pulse: true,
-///         ..Default::default()
-///     },
-///     ..Default::default()
-/// };
-/// let wake_source = nfc.idle(params, 5_000)?;
+/// let wake_source = nfc.idle(IdleParams::irq_in(), 5_000)?;
 ///
-/// // Tag detection mode, which needs a prior `calibrate_tag_detector`
-/// let params = IdleParams {
-///     wus: WakeUpSource {
-///         tag_detection: true,
-///         timeout: true,
-///         ..Default::default()
-///     },
-///     wu_period: 0x20, // Detection period
-///     max_sleep: 10,   // Max trials before timeout
-///     ..Default::default()
-/// };
+/// // Tag detection mode, which needs a prior `calibrate_tag_detector`:
+/// // 0x20 wake-up periods per trial, at most 8 trials before the timeout
+/// let params = IdleParams::tag_detection(0x20, 0x08)?;
 /// # let _ = (wake_source, params);
 /// # Ok::<(), st25r95::Error>(())
 /// ```
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct IdleParams {
     /// Wake-up sources configuration and LFO frequency
     ///
@@ -753,6 +756,15 @@ pub struct IdleParams {
 }
 
 impl Default for IdleParams {
+    /// The timings and thresholds every Idle configuration starts from.
+    ///
+    /// This names no wake-up source, so it is not on its own a configuration
+    /// the chip can be asked to enter: [`St25r95::idle`](crate::St25r95::idle)
+    /// rejects it with [`Error::IdleNoWakeUpSource`]. Reach for one of the
+    /// constructors - [`hibernate`](Self::hibernate), [`irq_in`](Self::irq_in),
+    /// [`spi_ss`](Self::spi_ss), [`timeout`](Self::timeout),
+    /// [`field_detection`](Self::field_detection) or
+    /// [`tag_detection`](Self::tag_detection) - and adjust the result.
     fn default() -> Self {
         Self {
             wus: WakeUpSource::default(),
@@ -782,8 +794,358 @@ impl Default for IdleParams {
     }
 }
 
+/// Smallest `MaxSleep` the ST25R95 accepts
+///
+/// The datasheet (DS12807) constrains the field to `0x00 < MaxSleep < 0x1F`.
+pub const MIN_MAX_SLEEP: u8 = 0x01;
+
+/// Largest `MaxSleep` the ST25R95 accepts
+///
+/// See [`MIN_MAX_SLEEP`].
+pub const MAX_MAX_SLEEP: u8 = 0x1E;
+
 impl IdleParams {
-    // TODO: impl a Builder that check max_sleep range
+    /// Idle in hibernate, woken only by a low pulse on IRQ_IN.
+    ///
+    /// The deepest state the chip offers, and the only one that stops the
+    /// low-frequency oscillator: nothing left running can count time or watch
+    /// the field, so IRQ_IN is the only way back and the chip comes back
+    /// through its power-up sequence.
+    ///
+    /// Reproduces the datasheet's "Active mode to Hibernate state" example.
+    pub fn hibernate() -> Self {
+        Self {
+            wus: WakeUpSource {
+                irq_in_low_pulse: true,
+                ..WakeUpSource::default()
+            },
+            enter_ctrl: CtrlResConf {
+                hibernate_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_ctrl: CtrlResConf {
+                hibernate_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_period: 0x00,
+            osc_start: 0x00,
+            dac_start: 0x00,
+            dac_data: DacData {
+                low: 0x00,
+                high: 0x00,
+            },
+            swing_count: 0x00,
+            max_sleep: 0x00,
+            ..Self::default()
+        }
+    }
+
+    /// Idle in sleep, woken by a low pulse on IRQ_IN.
+    ///
+    /// Draws more than [`hibernate`](Self::hibernate) but returns to the Ready
+    /// state, so the host can send the next command straight away.
+    ///
+    /// Reproduces the datasheet's "Active to WFE mode, wake-up by low pulse on
+    /// IRQ_IN" example.
+    pub fn irq_in() -> Self {
+        Self {
+            wus: WakeUpSource {
+                irq_in_low_pulse: true,
+                ..WakeUpSource::default()
+            },
+            enter_ctrl: CtrlResConf {
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_ctrl: CtrlResConf {
+                lfo_enabled: true,
+                hfo_enabled: true,
+                vdda_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_period: 0x00,
+            osc_start: 0x60,
+            dac_start: 0x00,
+            dac_data: DacData {
+                low: 0x00,
+                high: 0x00,
+            },
+            swing_count: 0x00,
+            max_sleep: 0x00,
+            ..Self::default()
+        }
+    }
+
+    /// Idle in sleep, woken by a low pulse on SPI_SS.
+    ///
+    /// The same state as [`irq_in`](Self::irq_in), reached by asserting the
+    /// SPI chip select instead of driving IRQ_IN, which saves a GPIO on boards
+    /// that have none to spare.
+    ///
+    /// Reproduces the datasheet's "Active to WFE mode, wake-up by low pulse on
+    /// SPI_SS" example.
+    pub fn spi_ss() -> Self {
+        Self {
+            wus: WakeUpSource {
+                ss_low_pulse: true,
+                ..WakeUpSource::default()
+            },
+            ..Self::irq_in()
+        }
+    }
+
+    /// Idle in sleep for a bounded time, woken by the internal timer.
+    ///
+    /// The low-frequency oscillator keeps running to count the sleep, so this
+    /// cannot be combined with hibernate. How long the sleep lasts follows
+    /// from `lfo_freq`, `wu_period` and `max_sleep`;
+    /// [`duration_before_timeout`](Self::duration_before_timeout) computes it.
+    ///
+    /// Reproduces the datasheet's "wake-up by Timeout" example when called
+    /// with `(LFOFreq::KHz32, 0x00, 0x08)`.
+    ///
+    /// Returns [`Error::InvalidU8Parameter`] when `max_sleep` is outside
+    /// [`MIN_MAX_SLEEP`]`..=`[`MAX_MAX_SLEEP`].
+    pub fn timeout(lfo_freq: LFOFreq, wu_period: u8, max_sleep: u8) -> crate::Result<Self> {
+        let params = Self {
+            wus: WakeUpSource {
+                lfo_freq,
+                timeout: true,
+                ..WakeUpSource::default()
+            },
+            enter_ctrl: CtrlResConf {
+                lfo_enabled: true,
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_ctrl: CtrlResConf {
+                lfo_enabled: true,
+                hfo_enabled: true,
+                vdda_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_period,
+            osc_start: 0x60,
+            dac_start: 0x60,
+            dac_data: DacData {
+                low: 0x00,
+                high: 0x00,
+            },
+            swing_count: 0x00,
+            max_sleep,
+            ..Self::default()
+        };
+        params.validate()?;
+        Ok(params)
+    }
+
+    /// Idle in sleep, woken by an external RF field or by the host.
+    ///
+    /// Enabling the field detector takes two EnterCtrl bits, not one: without
+    /// [`field_detect_aux_enabled`](CtrlResConf::field_detect_aux_enabled)
+    /// alongside
+    /// [`field_detector_enabled`](CtrlResConf::field_detector_enabled) the
+    /// chip enters a state that IRQ_IN, Reset and IDN do not bring it out of.
+    /// Setting both together is the reason this constructor exists.
+    ///
+    /// Reproduces the Idle template of ST's own ST25R95 reference driver,
+    /// IRQ_IN included so the host can always cut the wait short.
+    pub fn field_detection() -> Self {
+        Self {
+            wus: WakeUpSource {
+                lfo_freq: LFOFreq::KHz32,
+                irq_in_low_pulse: true,
+                field_detection: true,
+                ..WakeUpSource::default()
+            },
+            enter_ctrl: CtrlResConf {
+                field_detect_aux_enabled: true,
+                field_detector_enabled: true,
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_ctrl: CtrlResConf {
+                lfo_enabled: true,
+                hfo_enabled: true,
+                vdda_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_period: 0x20,
+            osc_start: 0x60,
+            dac_start: 0x60,
+            dac_data: DacData {
+                low: 0x74,
+                high: 0x84,
+            },
+            swing_count: 0x3F,
+            // Nothing here counts sleeps, so `MaxSleep` stays inactive and its
+            // datasheet range does not apply.
+            max_sleep: 0x00,
+            ..Self::default()
+        }
+    }
+
+    /// Idle in sleep, woken by a tag entering the periodically generated
+    /// field, or by the host.
+    ///
+    /// The chip raises the field and measures it on every trial, so the
+    /// reference current and both oscillators stay available during the
+    /// wake-up period. `max_sleep` bounds the number of trials.
+    ///
+    /// The comparator thresholds are left at their defaults on purpose:
+    /// [`St25r95::idle`](crate::St25r95::idle) overwrites them with the result
+    /// of [`calibrate_tag_detector`](crate::St25r95::calibrate_tag_detector),
+    /// and refuses to send the command when that calibration has not run.
+    ///
+    /// Reproduces the datasheet's "Active to Tag detector mode" example when
+    /// called with `(0x20, 0x08)`. Add `timeout: true` to
+    /// [`wus`](Self::wus) for a failsafe that reports why the chip woke up
+    /// even when no tag arrived.
+    ///
+    /// Returns [`Error::InvalidU8Parameter`] when `max_sleep` is outside
+    /// [`MIN_MAX_SLEEP`]`..=`[`MAX_MAX_SLEEP`].
+    pub fn tag_detection(wu_period: u8, max_sleep: u8) -> crate::Result<Self> {
+        let params = Self {
+            wus: WakeUpSource {
+                lfo_freq: LFOFreq::KHz32,
+                irq_in_low_pulse: true,
+                tag_detection: true,
+                ..WakeUpSource::default()
+            },
+            enter_ctrl: CtrlResConf {
+                lfo_enabled: true,
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_ctrl: CtrlResConf {
+                iref_enabled: true,
+                lfo_enabled: true,
+                hfo_enabled: true,
+                vdda_enabled: true,
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_period,
+            max_sleep,
+            ..Self::default()
+        };
+        params.validate()?;
+        Ok(params)
+    }
+
+    /// The Idle used by each step of the tag detector calibration.
+    ///
+    /// One trial per call, thresholds driven by the caller rather than by a
+    /// previous calibration, and the timeout enabled so a trial that detects
+    /// nothing still reports back. These are the bytes ST's reference driver
+    /// sends while calibrating.
+    pub(crate) fn tag_detector_calibration() -> Self {
+        Self {
+            wus: WakeUpSource {
+                lfo_freq: LFOFreq::KHz32,
+                tag_detection: true,
+                timeout: true,
+                ..WakeUpSource::default()
+            },
+            enter_ctrl: CtrlResConf {
+                dac_comp_high: true,
+                lfo_enabled: true,
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_ctrl: CtrlResConf {
+                iref_enabled: true,
+                dac_comp_high: true,
+                lfo_enabled: true,
+                hfo_enabled: true,
+                vdda_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            wu_period: 0x00,
+            dac_data: DacData {
+                low: 0x00,
+                high: 0x00,
+            },
+            max_sleep: MIN_MAX_SLEEP,
+            ..Self::default()
+        }
+    }
+
+    /// Check that the configuration describes a chip that can wake up again.
+    ///
+    /// The fields of this struct are public, so a caller can always assemble a
+    /// combination the ST25R95 does not implement. Some of those are merely
+    /// useless; others leave the chip in a state only a power cycle clears,
+    /// which on a board without independent NFC rail control means the whole
+    /// product. [`St25r95::idle`](crate::St25r95::idle) and
+    /// [`St25r95::idle_async`](crate::St25r95::idle_async) call this before
+    /// touching the SPI bus, so a rejected configuration never reaches the
+    /// chip.
+    ///
+    /// Rejected here:
+    ///
+    /// - no wake-up source at all, which is a sleep nothing ends;
+    /// - field detection without both of its EnterCtrl bits;
+    /// - tag detection without the resources its trials need;
+    /// - field and tag detection at once, which would ask the chip to watch for an
+    ///   external field and to generate its own;
+    /// - hibernate with any wake-up source other than IRQ_IN, since hibernate stops the
+    ///   oscillator every other source depends on;
+    /// - hibernate and sleep requested from the same control word;
+    /// - `MaxSleep` outside the datasheet range while something counts sleeps.
+    pub fn validate(&self) -> crate::Result<()> {
+        let wus = self.wus;
+        let any_source = wus.ss_low_pulse
+            || wus.irq_in_low_pulse
+            || wus.field_detection
+            || wus.tag_detection
+            || wus.timeout;
+        if !any_source {
+            return Err(Error::IdleNoWakeUpSource);
+        }
+
+        if wus.field_detection && wus.tag_detection {
+            return Err(Error::IdleConflictingWakeUpSources);
+        }
+
+        if wus.field_detection
+            && !(self.enter_ctrl.field_detect_aux_enabled && self.enter_ctrl.field_detector_enabled)
+        {
+            return Err(Error::IdleFieldDetectionIncomplete);
+        }
+
+        if wus.tag_detection
+            && !(self.wu_ctrl.iref_enabled && self.wu_ctrl.lfo_enabled && self.wu_ctrl.hfo_enabled)
+        {
+            return Err(Error::IdleTagDetectionIncomplete);
+        }
+
+        for ctrl in [self.enter_ctrl, self.wu_ctrl, self.leave_ctrl] {
+            if ctrl.hibernate_state_enabled && ctrl.sleep_state_enabled {
+                return Err(Error::IdleConflictingPowerStates);
+            }
+        }
+
+        if self.enter_ctrl.hibernate_state_enabled
+            && (wus.ss_low_pulse || wus.field_detection || wus.tag_detection || wus.timeout)
+        {
+            return Err(Error::IdleHibernateNeedsIrqIn);
+        }
+
+        // `MaxSleep` bounds how many wake-up periods pass before the chip
+        // gives up, so it only means anything when something counts them.
+        if (wus.timeout || wus.tag_detection)
+            && !(MIN_MAX_SLEEP..=MAX_MAX_SLEEP).contains(&self.max_sleep)
+        {
+            return Err(Error::InvalidU8Parameter {
+                min: MIN_MAX_SLEEP,
+                max: MAX_MAX_SLEEP,
+                actual: self.max_sleep,
+            });
+        }
+
+        Ok(())
+    }
 
     pub(crate) fn data(self) -> [u8; 14] {
         let mut data = [0u8; 14];
@@ -1136,8 +1498,9 @@ mod tests {
             .data(),
             [0x03, 0xA1, 0x00, 0xB8, 0x01, 0x18, 0x00, 0x20, 0x60, 0x60, 0x00, 0x74, 0x3F, 0x01] /* Datasheet gives bytes[3] = 0xF8 (with bit 6 set) */
         );
-        // RFAL Idle default value
-        // RFAL can only modify wu_period and dac_data
+        // Idle template of an earlier RFAL release, kept as a serialization
+        // fixture. The 1.7.0 template is the field-detection one asserted by
+        // `test_idle_constructors_match_published_commands`.
         assert_eq!(
             IdleParams {
                 wus: WakeUpSource {
@@ -1225,5 +1588,212 @@ mod tests {
             .data(),
             [0x03, 0xA1, 0x00, 0xB8, 0x01, 0x18, 0x00, 0x00, 0x60, 0x60, 0x00, 0x00, 0x3F, 0x01]
         );
+    }
+
+    /// Every constructor has to reproduce a published command, byte for byte.
+    ///
+    /// The expectations are the Idle examples of the ST25R95 datasheet and, for
+    /// field detection and calibration, the templates in ST's own reference
+    /// driver. A constructor that drifts from them stops being a known-good
+    /// configuration, which is the only reason it exists.
+    #[test]
+    pub fn test_idle_constructors_match_published_commands() {
+        // Datasheet: Active mode to Hibernate state.
+        assert_eq!(
+            IdleParams::hibernate().data(),
+            [0x08, 0x04, 0x00, 0x04, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        // Datasheet: Active to WFE mode, wake-up by low pulse on IRQ_IN.
+        assert_eq!(
+            IdleParams::irq_in().data(),
+            [0x08, 0x01, 0x00, 0x38, 0x00, 0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        // Datasheet: Active to WFE mode, wake-up by low pulse on SPI_SS.
+        assert_eq!(
+            IdleParams::spi_ss().data(),
+            [0x10, 0x01, 0x00, 0x38, 0x00, 0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        // Datasheet: wake-up by Timeout.
+        assert_eq!(
+            IdleParams::timeout(LFOFreq::KHz32, 0x00, 0x08)
+                .unwrap()
+                .data(),
+            [0x01, 0x21, 0x00, 0x38, 0x00, 0x18, 0x00, 0x00, 0x60, 0x60, 0x00, 0x00, 0x00, 0x08]
+        );
+        // Datasheet: Active to Tag detector mode. Byte 3 is 0x79 there; bit 6
+        // of WuCtrl has no name in `CtrlResConf`, so the driver sends 0x39.
+        assert_eq!(
+            IdleParams::tag_detection(0x20, 0x08).unwrap().data(),
+            [0x0A, 0x21, 0x00, 0x39, 0x01, 0x18, 0x00, 0x20, 0x60, 0x60, 0x64, 0x74, 0x3F, 0x08]
+        );
+        // ST reference driver: the Idle sent while calibrating.
+        assert_eq!(
+            IdleParams::tag_detector_calibration().data(),
+            [0x03, 0xA1, 0x00, 0xB8, 0x01, 0x18, 0x00, 0x00, 0x60, 0x60, 0x00, 0x00, 0x3F, 0x01]
+        );
+        // ST reference driver: the field-detection Idle, both EnterCtrl bits
+        // set (0x42 in the high byte).
+        assert_eq!(
+            IdleParams::field_detection().data(),
+            [0x0C, 0x01, 0x42, 0x38, 0x00, 0x18, 0x00, 0x20, 0x60, 0x60, 0x74, 0x84, 0x3F, 0x00]
+        );
+    }
+
+    #[test]
+    pub fn test_idle_constructors_validate() {
+        for params in [
+            IdleParams::hibernate(),
+            IdleParams::irq_in(),
+            IdleParams::spi_ss(),
+            IdleParams::timeout(LFOFreq::KHz4, 0x20, MIN_MAX_SLEEP).unwrap(),
+            IdleParams::timeout(LFOFreq::KHz32, 0x20, MAX_MAX_SLEEP).unwrap(),
+            IdleParams::field_detection(),
+            IdleParams::tag_detection(0x20, MIN_MAX_SLEEP).unwrap(),
+            IdleParams::tag_detection(0x20, MAX_MAX_SLEEP).unwrap(),
+            IdleParams::tag_detector_calibration(),
+        ] {
+            assert_eq!(params.validate(), Ok(()));
+        }
+
+        // The timeout failsafe is safe to add to tag detection.
+        let mut tag = IdleParams::tag_detection(0x20, 0x08).unwrap();
+        tag.wus.timeout = true;
+        assert_eq!(tag.validate(), Ok(()));
+    }
+
+    #[test]
+    pub fn test_idle_rejects_a_sleep_nothing_ends() {
+        // The bare default names no wake-up source.
+        assert_eq!(
+            IdleParams::default().validate(),
+            Err(Error::IdleNoWakeUpSource)
+        );
+    }
+
+    #[test]
+    pub fn test_idle_rejects_incomplete_field_detection() {
+        // This is the combination the public documentation used to suggest:
+        // the wake-up source set from a default that leaves both EnterCtrl
+        // bits clear.
+        let params = IdleParams {
+            wus: WakeUpSource {
+                field_detection: true,
+                ..Default::default()
+            },
+            enter_ctrl: CtrlResConf::NONE,
+            ..Default::default()
+        };
+        assert_eq!(params.validate(), Err(Error::IdleFieldDetectionIncomplete));
+
+        // The auxiliary bit on its own is not enough either way round.
+        for enter_ctrl in [
+            CtrlResConf {
+                field_detector_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            CtrlResConf {
+                field_detect_aux_enabled: true,
+                ..CtrlResConf::NONE
+            },
+        ] {
+            let params = IdleParams {
+                enter_ctrl,
+                ..IdleParams::field_detection()
+            };
+            assert_eq!(params.validate(), Err(Error::IdleFieldDetectionIncomplete));
+        }
+    }
+
+    #[test]
+    pub fn test_idle_rejects_incomplete_tag_detection() {
+        for wu_ctrl in [
+            CtrlResConf {
+                iref_enabled: false,
+                ..IdleParams::tag_detection(0x20, 0x08).unwrap().wu_ctrl
+            },
+            CtrlResConf {
+                lfo_enabled: false,
+                ..IdleParams::tag_detection(0x20, 0x08).unwrap().wu_ctrl
+            },
+            CtrlResConf {
+                hfo_enabled: false,
+                ..IdleParams::tag_detection(0x20, 0x08).unwrap().wu_ctrl
+            },
+        ] {
+            let params = IdleParams {
+                wu_ctrl,
+                ..IdleParams::tag_detection(0x20, 0x08).unwrap()
+            };
+            assert_eq!(params.validate(), Err(Error::IdleTagDetectionIncomplete));
+        }
+    }
+
+    #[test]
+    pub fn test_idle_rejects_mixed_configurations() {
+        // Watching for someone else's field while generating one.
+        let mut params = IdleParams::field_detection();
+        params.wus.tag_detection = true;
+        assert_eq!(params.validate(), Err(Error::IdleConflictingWakeUpSources));
+
+        // Hibernate stops the oscillator the timer runs on.
+        let mut params = IdleParams::hibernate();
+        params.wus.timeout = true;
+        params.max_sleep = 0x08;
+        assert_eq!(params.validate(), Err(Error::IdleHibernateNeedsIrqIn));
+
+        // ... and the one the field detector runs on.
+        let params = IdleParams {
+            enter_ctrl: CtrlResConf {
+                hibernate_state_enabled: true,
+                sleep_state_enabled: false,
+                ..IdleParams::field_detection().enter_ctrl
+            },
+            ..IdleParams::field_detection()
+        };
+        assert_eq!(params.validate(), Err(Error::IdleHibernateNeedsIrqIn));
+
+        // Sleep and hibernate are alternatives, not resources to combine.
+        let params = IdleParams {
+            enter_ctrl: CtrlResConf {
+                hibernate_state_enabled: true,
+                sleep_state_enabled: true,
+                ..CtrlResConf::NONE
+            },
+            ..IdleParams::irq_in()
+        };
+        assert_eq!(params.validate(), Err(Error::IdleConflictingPowerStates));
+    }
+
+    #[test]
+    pub fn test_idle_rejects_reserved_max_sleep() {
+        // The datasheet requires 0x00 < MaxSleep < 0x1F.
+        for max_sleep in [0x00, 0x1F, 0xFF] {
+            assert_eq!(
+                IdleParams::timeout(LFOFreq::KHz32, 0x20, max_sleep),
+                Err(Error::InvalidU8Parameter {
+                    min: MIN_MAX_SLEEP,
+                    max: MAX_MAX_SLEEP,
+                    actual: max_sleep,
+                })
+            );
+            assert_eq!(
+                IdleParams::tag_detection(0x20, max_sleep),
+                Err(Error::InvalidU8Parameter {
+                    min: MIN_MAX_SLEEP,
+                    max: MAX_MAX_SLEEP,
+                    actual: max_sleep,
+                })
+            );
+        }
+
+        // Nothing counts sleeps in these, so the field stays inactive and out
+        // of range values are none of the driver's business.
+        for params in [IdleParams::hibernate(), IdleParams::field_detection()] {
+            let params = IdleParams {
+                max_sleep: 0xFF,
+                ..params
+            };
+            assert_eq!(params.validate(), Ok(()));
+        }
     }
 }
