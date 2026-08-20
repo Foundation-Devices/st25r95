@@ -81,7 +81,7 @@
 //! let polling = [0x00, 0xFF, 0xFF, 0x01, 0x00]; // System code: FFFF (wildcard)
 //! let response = reader.send_receive(&polling)?;
 //!
-//! // Configure for high-speed transactions; leave the CRC to FeliCa itself
+//! // Configure for high-speed transactions; the chip keeps appending the CRC
 //! let params = felica::reader::Parameters::default()
 //!     .tx_data_rate(felica::reader::DataRate::Kbps424)
 //!     .rx_data_rate(felica::reader::DataRate::Kbps424);
@@ -93,11 +93,21 @@
 pub mod reader {
     use super::super::{ProtocolParams, MAX_PP};
 
-    #[derive(Debug, Copy, Clone, Default)]
+    /// Bit rate of one direction of a FeliCa exchange
+    ///
+    /// The ST25R95 encodes the rate on two bits of the ProtocolSelect
+    /// parameters, once for transmission and once for reception. Encoding
+    /// `0b00` - 106 Kbps - is reserved in the reception field (datasheet
+    /// DS12807, Table 12), and FeliCa itself only defines 212 and 424 Kbps
+    /// passive communication, so it has no variant here: a rate that cannot be
+    /// named cannot reach the chip.
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
     pub enum DataRate {
+        /// 212 Kbps, the rate used by the datasheet's FeliCa example
         #[default]
-        Kbps106 = 0b00,
         Kbps212 = 0b01,
+
+        /// 424 Kbps
         Kbps424 = 0b10,
     }
 
@@ -125,12 +135,30 @@ pub mod reader {
         }
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub struct Parameters {
         tx_data_rate: DataRate,
         rx_data_rate: DataRate,
         with_crc: bool,
         rwt: Option<RWT>,
+    }
+
+    impl Default for Parameters {
+        /// 212 Kbps in both directions, with the CRC appended by the chip.
+        ///
+        /// The first parameter byte is then `0x51`, which is the FeliCa
+        /// ProtocolSelect the datasheet gives as its example
+        /// (`0x02 0x02 0x04 0x51`) and the one ST's own reference stack sends.
+        /// A FeliCa tag answers at the rate it was polled at, so the two rates
+        /// are set together.
+        fn default() -> Self {
+            Self {
+                tx_data_rate: DataRate::default(),
+                rx_data_rate: DataRate::default(),
+                with_crc: true,
+                rwt: None,
+            }
+        }
     }
 
     impl Parameters {
@@ -148,9 +176,24 @@ pub mod reader {
             }
         }
 
+        /// Let the chip append the CRC to every transmitted frame.
+        ///
+        /// This is what [`Parameters::default`] already does; the method is
+        /// kept so the intent can be written out.
         pub fn with_crc(self) -> Self {
             Self {
                 with_crc: true,
+                ..self
+            }
+        }
+
+        /// Leave the CRC to the caller.
+        ///
+        /// Every FeliCa frame carries a CRC, so the payload handed to
+        /// `send_receive` must then already end with it.
+        pub fn without_crc(self) -> Self {
+            Self {
+                with_crc: false,
                 ..self
             }
         }
@@ -207,23 +250,61 @@ pub mod reader {
         }
 
         #[test]
-        pub fn test_parameters() {
+        pub fn test_default_is_the_datasheet_example() {
             assert_eq!(
                 Parameters::default().data(),
-                ([0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 2)
+                ([0x51, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 2)
             );
             assert_eq!(
                 Parameters::default().with_crc().data(),
-                ([0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 2)
+                ([0x51, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 2)
+            );
+            assert_eq!(
+                Parameters::default().without_crc().data(),
+                ([0x50, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 2)
+            );
+        }
+
+        #[test]
+        pub fn test_every_representable_rate_pair() {
+            // The four combinations the type system allows. 106 Kbps is not
+            // among them, so the reserved receive encoding 0b00 cannot be
+            // built: the assertions below check that for each pair.
+            let pairs = [
+                (DataRate::Kbps212, DataRate::Kbps212, 0x51),
+                (DataRate::Kbps212, DataRate::Kbps424, 0x61),
+                (DataRate::Kbps424, DataRate::Kbps212, 0x91),
+                (DataRate::Kbps424, DataRate::Kbps424, 0xA1),
+            ];
+            for (tx, rx, expected) in pairs {
+                let (parameters, param_len) = Parameters::default()
+                    .tx_data_rate(tx)
+                    .rx_data_rate(rx)
+                    .data();
+                assert_eq!(parameters[0], expected);
+                assert_eq!(param_len, 2);
+                // Neither field may hold a reserved encoding.
+                assert_ne!((parameters[0] >> 4) & 0b11, 0b00);
+                assert_ne!((parameters[0] >> 6) & 0b11, 0b00);
+                assert_ne!((parameters[0] >> 4) & 0b11, 0b11);
+                assert_ne!((parameters[0] >> 6) & 0b11, 0b11);
+            }
+        }
+
+        #[test]
+        pub fn test_parameters_with_rwt() {
+            assert_eq!(
+                Parameters::default().rwt(RWT::new(1, 2).unwrap()).data(),
+                ([0x51, 0x10, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00], 4)
             );
             assert_eq!(
                 Parameters::default()
-                    .tx_data_rate(DataRate::Kbps212)
-                    .rx_data_rate(DataRate::Kbps212)
-                    .with_crc()
+                    .tx_data_rate(DataRate::Kbps424)
+                    .rx_data_rate(DataRate::Kbps424)
+                    .without_crc()
                     .rwt(RWT::new(1, 2).unwrap())
                     .data(),
-                ([0x51, 0x10, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00], 4)
+                ([0xA0, 0x10, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00], 4)
             );
         }
 
@@ -234,7 +315,7 @@ pub mod reader {
                 Parameters::default()
                     .rwt(RWT::new(MAX_PP, 0).unwrap())
                     .data(),
-                ([0x00, 0x10, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00], 4)
+                ([0x51, 0x10, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00], 4)
             );
         }
     }

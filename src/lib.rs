@@ -2032,6 +2032,37 @@ mod tests {
     }
 
     #[test]
+    pub fn test_felica_protocol_select_wire_bytes() {
+        // The default selector is the datasheet's FeliCa example: protocol
+        // 0x04 with parameter 0x51, 212 Kbps in both directions and the CRC
+        // appended by the chip.
+        let nfc = unselected_driver(RecordingSpi::default())
+            .protocol_select_felica(Default::default())
+            .unwrap();
+        assert_eq!(nfc.spi.command, Some(Command::ProtocolSelect));
+        assert_eq!(nfc.spi.data.as_slice(), &[0x04, 0x51, 0x10]);
+        assert!(!nfc.spi.sod);
+
+        // 424 Kbps in both directions, CRC left to the caller.
+        let params = felica::reader::Parameters::default()
+            .tx_data_rate(felica::reader::DataRate::Kbps424)
+            .rx_data_rate(felica::reader::DataRate::Kbps424)
+            .without_crc();
+        let nfc = unselected_driver(RecordingSpi::default())
+            .protocol_select_felica(params)
+            .unwrap();
+        assert_eq!(nfc.spi.data.as_slice(), &[0x04, 0xA0, 0x10]);
+
+        // With a receive waiting time, PP and MM follow.
+        let params =
+            felica::reader::Parameters::default().rwt(felica::reader::RWT::new(6, 0).unwrap());
+        let nfc = unselected_driver(RecordingSpi::default())
+            .protocol_select_felica(params)
+            .unwrap();
+        assert_eq!(nfc.spi.data.as_slice(), &[0x04, 0x51, 0x10, 0x06, 0x00]);
+    }
+
+    #[test]
     pub fn test_felica_default_arc_b() {
         let reader = St25r95 {
             spi: NoopSpi,
