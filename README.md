@@ -28,7 +28,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-st25r95 = "0.5"
+st25r95 = "0.6"
 ```
 
 ### Basic Example
